@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>P2P Share — Partage éphémère & instantané</title>
+  <meta name="description" content="Partagez des fichiers directement entre appareils, sans inscription. Éphémère et chiffré de bout en bout." />
+
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="P2P Share" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="icon" type="image/png" href="/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Libs -->
+  <script src="/socket.io/socket.io.min.js"></script>
+  <script src="/vendor/peerjs.min.js"></script>
+  <script src="/vendor/qrcode.min.js"></script>
+  <script src="/vendor/jszip.min.js"></script>
+
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- SCREEN: HOME -->
+  <div id="screen-home" class="screen active">
+    <div class="home-bg">
+      <div class="grid-overlay"></div>
+    </div>
+    <div class="home-content">
+      <header class="home-header">
+        <div class="logo">P2P<span class="logo-dot">·</span>share</div>
+        <div class="tagline">Zéro compte · Zéro trace · Zéro friction</div>
+      </header>
+
+      <main class="home-main">
+        <h1 class="hero-title">Partagez.<br><em>Instantanément.</em></h1>
+        <p class="hero-sub">Fichiers de navigateur à navigateur, chiffrés de bout en bout.<br>L'hôte part, tout disparaît.</p>
+
+        <div class="pseudo-block">
+          <label class="pseudo-label" id="pseudo-label">Votre pseudonyme</label>
+          <div class="pseudo-row">
+            <div class="pseudo-display" id="pseudo-display" contenteditable="true" spellcheck="false" role="textbox" aria-labelledby="pseudo-label"></div>
+            <button class="btn-refresh-pseudo" id="btn-refresh-pseudo" title="Nouveau pseudo aléatoire" aria-label="Générer un nouveau pseudonyme">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="home-actions">
+          <button class="btn-create" id="btn-create">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+            Créer un salon
+          </button>
+          <div class="divider-or"><span>ou</span></div>
+          <div class="join-row">
+            <input type="text" id="join-code" class="join-input" placeholder="Lien d'invitation ou code" aria-label="Lien d'invitation ou code" maxlength="512" autocomplete="off" spellcheck="false" />
+            <button class="btn-scan" id="btn-scan" title="Scanner un QR code" aria-label="Scanner un QR code d'invitation" hidden>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="7" width="4" height="4"/><rect x="7" y="13" width="4" height="4"/><path d="M13 13h4v4"/></svg>
+            </button>
+            <button class="btn-join" id="btn-join">Rejoindre</button>
+          </div>
+        </div>
+
+        <div class="features-row">
+          <div class="feature">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            </div>
+            <span>Chiffré E2E</span>
+          </div>
+          <div class="feature">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </div>
+            <span>P2P direct</span>
+          </div>
+          <div class="feature">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <span>Éphémère</span>
+          </div>
+          <div class="feature">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <span>Sans limite</span>
+          </div>
+        </div>
+
+        <button class="btn-install" id="btn-install" hidden>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+          Installer l'application
+        </button>
+      </main>
+    </div>
+  </div>
+
+  <!-- SCREEN: LOADING -->
+  <div id="screen-loading" class="screen">
+    <div class="loading-content">
+      <div class="spinner"></div>
+      <div class="loading-text" id="loading-text">Connexion au salon…</div>
+    </div>
+  </div>
+
+  <!-- SCREEN: SALON -->
+  <div id="screen-salon" class="screen">
+    <div class="salon-layout">
+
+      <!-- SIDEBAR -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top">
+          <div class="sidebar-brand">
+            <div class="logo sidebar-logo">P2P<span class="logo-dot">·</span>share</div>
+            <div class="salon-id-display">
+              <span class="salon-id-label">Salon</span>
+              <span class="salon-id-code" id="sidebar-salon-id">—</span>
+            </div>
+          </div>
+          <!-- Compact actions, mobile only -->
+          <div class="mobile-actions">
+            <button class="mobile-action" data-panel="invite" aria-expanded="false" aria-controls="section-invite" title="Inviter">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/></svg>
+              <span>Inviter</span>
+            </button>
+            <button class="mobile-action" data-panel="members" aria-expanded="false" aria-controls="section-members" title="Membres">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              <span class="member-count" id="member-count-mobile">1</span>
+            </button>
+            <button class="mobile-action mobile-leave" id="btn-leave-mobile" title="Quitter le salon" aria-label="Quitter le salon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="sidebar-section" id="section-invite">
+          <div class="section-title">Inviter</div>
+          <div class="qr-wrap">
+            <div id="qr-code" class="qr-box" aria-label="QR code d'invitation"></div>
+          </div>
+          <div class="link-row">
+            <div class="link-val" id="link-display"></div>
+            <button class="btn-copy" id="btn-copy" title="Copier le lien" aria-label="Copier le lien d'invitation">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="sidebar-section members-section" id="section-members">
+          <div class="section-title">Membres <span class="member-count" id="member-count">1</span></div>
+          <ul class="members-list" id="members-list"></ul>
+        </div>
+
+        <div class="sidebar-footer">
+          <button class="btn-leave" id="btn-leave">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            Quitter le salon
+          </button>
+        </div>
+      </aside>
+
+      <!-- MAIN -->
+      <main class="salon-main">
+        <div class="main-toolbar">
+          <div class="toolbar-left">
+            <button class="btn-add-files" id="btn-add-files">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Ajouter des fichiers
+            </button>
+            <button class="btn-add-folder" id="btn-add-folder">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              Dossier
+            </button>
+          </div>
+          <div class="toolbar-right">
+            <div class="files-count" id="files-count">0 fichier</div>
+            <button class="btn-zip" id="btn-zip" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Tout télécharger (.zip)
+            </button>
+          </div>
+          <input type="file" id="file-input" multiple hidden />
+          <input type="file" id="folder-input" multiple hidden webkitdirectory />
+        </div>
+
+        <!-- DROP ZONE -->
+        <div class="drop-zone" id="drop-zone">
+          <div class="drop-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </div>
+          <div class="drop-title">Glissez vos fichiers ici</div>
+          <div class="drop-sub">ou utilisez le bouton ci-dessus</div>
+        </div>
+
+        <!-- FILES LIST -->
+        <div class="files-list" id="files-list"></div>
+
+        <!-- EMPTY STATE -->
+        <div class="empty-state" id="empty-state">
+          <div class="empty-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+          </div>
+          <div class="empty-title">Aucun fichier dans le salon</div>
+          <div class="empty-sub">Ajoutez des fichiers pour les partager avec les membres connectés.</div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- SCREEN: DESTROYED -->
+  <div id="screen-destroyed" class="screen">
+    <div class="destroyed-content">
+      <div class="destroyed-icon">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+      </div>
+      <h2 class="destroyed-title">Salon détruit</h2>
+      <p class="destroyed-msg" id="destroyed-msg">L'hôte a quitté le salon.</p>
+      <button class="btn-create" id="btn-home">Revenir à l'accueil</button>
+    </div>
+  </div>
+
+  <!-- FILE VIEWER -->
+  <div class="viewer" id="viewer" hidden>
+    <div class="viewer-backdrop" id="viewer-backdrop"></div>
+    <div class="viewer-panel" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
+      <div class="viewer-header">
+        <div class="viewer-title" id="viewer-title"></div>
+        <button class="viewer-btn" id="viewer-tab" title="Ouvrir dans un nouvel onglet">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          <span>Nouvel onglet</span>
+        </button>
+        <button class="viewer-btn" id="viewer-share" title="Ouvrir avec une autre application" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          <span>Ouvrir avec…</span>
+        </button>
+        <button class="viewer-btn" id="viewer-save" title="Enregistrer le fichier">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Enregistrer</span>
+        </button>
+        <button class="viewer-btn viewer-close" id="viewer-close" title="Fermer (Échap)" aria-label="Fermer l'aperçu">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="viewer-body" id="viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- QR SCANNER -->
+  <div class="viewer scanner" id="scanner" hidden>
+    <div class="viewer-backdrop" id="scanner-backdrop"></div>
+    <div class="viewer-panel scanner-panel" role="dialog" aria-modal="true" aria-labelledby="scanner-title">
+      <div class="viewer-header">
+        <div class="viewer-title" id="scanner-title">Scanner un QR code d'invitation</div>
+        <button class="viewer-btn viewer-close" id="scanner-close" title="Fermer (Échap)" aria-label="Fermer le scanner">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="scanner-body">
+        <video id="scanner-video" playsinline muted></video>
+        <div class="scanner-frame"></div>
+      </div>
+      <div class="scanner-hint" id="scanner-hint">Placez le QR code dans le cadre</div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div class="toast" id="toast" role="alert" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+node_modules/
+# Local HTTPS certificates (private keys!)
+certs/
+*.pem
+*.key
+.env
+*.log
+.DS_Store
+Thumbs.db
