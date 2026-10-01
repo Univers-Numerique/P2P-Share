@@ -18,7 +18,7 @@ const IV_LEN = 12;
 const ID_RE = /^[0-9a-f]{16}$/;
 const SALON_RE = /^[0-9a-f]{8}$/;
 const KEY_RE = /^[A-Za-z0-9_-]{22}$/;
-const HOST_SESSION_KEY = 'p2pshare-host';
+const SESSION_KEY = 'p2pshare-session';
 const PSEUDO_KEY = 'p2pshare-pseudo';
 const PREVIEW_MAX_BYTES = 300 * 1024 * 1024;  // larger remote files must be downloaded before opening
 const TEXT_PREVIEW_MAX = 1024 * 1024;
@@ -48,13 +48,15 @@ let cryptoKey = null;       // AES-GCM key derived from salonKey
 let authToken = null;       // derived from salonKey, proves knowledge of the key to the server
 let myPseudo = '';
 let isHost = false;
+let myMemberId = null;       // stable identity in the salon, survives reconnections
+let sessionToken = null;     // proves that identity to the server when resuming
 let zipping = false;
 
-// members: Map<socketId, { pseudo, isHost, peerId, conn, retries, retryTimer }>
+// members: Map<memberId, { pseudo, isHost, peerId, conn, retries, retryTimer }>
 const members = new Map();
 // myFiles: Map<fileId, { file, name, size, mimeType }>
 const myFiles = new Map();
-// remoteFiles: Map<fileId, { fileId, name, size, mimeType, senderSocketId, senderPseudo }>
+// remoteFiles: Map<fileId, { fileId, name, size, mimeType, senderMemberId, senderPseudo }>
 const remoteFiles = new Map();
 // downloads: Map<transferId, incoming transfer>
 const downloads = new Map();
@@ -284,9 +286,6 @@ function parseInvite(input) {
   return SALON_RE.test(sid) && KEY_RE.test(key) ? { salonId: sid, key } : null;
 }
 
-function getHostSession() {
-  try { return JSON.parse(storageGet(sessionStorage, HOST_SESSION_KEY)); } catch { return null; }
-}
 
 // ── DOM REFS ──────────────────────────────────────────────────────
 const pseudoDisplay    = document.getElementById('pseudo-display');
@@ -361,50 +360,87 @@ function initSocket() {
   let wasConnected = false;
 
   socket.on('connect', () => {
-    if (wasConnected && salonId) rejoinAfterReconnect();
+    if (wasConnected && salonId) resumeAfterReconnect();
     wasConnected = true;
   });
 
   socket.on('disconnect', (reason) => {
-    if (salonId && reason !== 'io client disconnect') showToast('Connexion au serveur perdue, reconnexion…', 5000);
+    // When the screen is off we keep our place in the salon: no need to warn
+    if (salonId && reason !== 'io client disconnect' && document.visibilityState === 'visible') {
+      showToast('Connexion perdue, reconnexion…', 4000);
+    }
   });
 
-  socket.on('member-joined', ({ socketId, pseudo, isHost: host }) => {
+  // The same session was resumed elsewhere (duplicated tab, other device)
+  socket.on('session-replaced', () => {
+    resetSalon();
+    saveSession(null);
+    history.replaceState(null, '', '/');
+    document.getElementById('destroyed-msg').textContent = 'Cette session a été reprise dans un autre onglet ou sur un autre appareil.';
+    showScreen('screen-destroyed');
+  });
+
+  socket.on('member-joined', ({ memberId, pseudo, isHost: host }) => {
     if (!salonId) return;
-    addMember(socketId, pseudo, host, null);
-    showToast(host ? `${pseudo} (hôte) est de retour.` : `${pseudo} a rejoint le salon.`);
-    for (const fileId of myFiles.keys()) announceFile(fileId, socketId);
+    addMember(memberId, pseudo, host, null, false);
+    showToast(`${pseudo} a rejoint le salon.`);
+    for (const fileId of myFiles.keys()) announceFile(fileId, memberId);
   });
 
-  socket.on('peer-registered', ({ socketId, peerId }) => {
-    const m = members.get(socketId);
+  socket.on('member-away', ({ memberId, graceMs }) => {
+    const m = members.get(memberId);
     if (!m) return;
-    if (m.peerId !== peerId) closeConn(socketId);
+    setMemberAway(memberId, true);
+    if (m.isHost) {
+      showToast(`${m.pseudo} (hôte) est en veille. Le salon fermera dans ${Math.round(graceMs / 60_000)} min s'il ne revient pas.`, 6000);
+    }
+  });
+
+  socket.on('member-back', ({ memberId, pseudo, isHost: host }) => {
+    if (!salonId) return;
+    if (members.has(memberId)) {
+      setMemberPseudo(memberId, pseudo);
+      setMemberAway(memberId, false);
+    } else {
+      addMember(memberId, pseudo, host, null, false);
+    }
+    // Their page may have been reloaded: make sure they know our files
+    for (const fileId of myFiles.keys()) announceFile(fileId, memberId);
+  });
+
+  socket.on('peer-registered', ({ memberId, peerId }) => {
+    const m = members.get(memberId);
+    if (!m) return;
+    if (m.peerId !== peerId) closeConn(memberId);
     m.peerId = peerId;
-    maybeConnect(socketId);
+    maybeConnect(memberId);
   });
 
-  socket.on('member-left', ({ socketId, pseudo }) => {
-    if (!members.has(socketId)) return;
-    removeMember(socketId);
+  socket.on('member-left', ({ memberId, pseudo }) => {
+    if (!members.has(memberId)) return;
+    removeMember(memberId);
     showToast(`${pseudo} a quitté le salon.`);
-  });
-
-  socket.on('host-away', ({ graceMs }) => {
-    showToast(`L'hôte s'est déconnecté. Le salon sera fermé dans ${Math.round(graceMs / 1000)} s s'il ne revient pas.`, 6000);
   });
 
   socket.on('file-announce', (p) => { onFileAnnounced(p).catch(err => console.warn('file-announce:', err)); });
 
   socket.on('file-remove', ({ from, fileId }) => {
     const info = remoteFiles.get(fileId);
-    if (!info || info.senderSocketId !== from) return;
+    if (!info || info.senderMemberId !== from) return;
     removeRemoteFile(fileId);
+  });
+
+  // A member lists the files it still has (after a reload): drop the others
+  socket.on('file-sync', ({ from, fileIds }) => {
+    const keep = new Set(fileIds);
+    for (const [fileId, info] of [...remoteFiles]) {
+      if (info.senderMemberId === from && !keep.has(fileId)) removeRemoteFile(fileId);
+    }
   });
 
   socket.on('salon-destroyed', ({ reason }) => {
     resetSalon();
-    storageSet(sessionStorage, HOST_SESSION_KEY, null);
+    saveSession(null);
     history.replaceState(null, '', '/');
     document.getElementById('destroyed-msg').textContent = reason;
     showScreen('screen-destroyed');
@@ -431,6 +467,30 @@ async function emitAck(event, data) {
   return socket.timeout(10_000).emitWithAck(event, data);
 }
 
+// Coming back to the page (screen unlocked, app reopened): reconnect right away
+// instead of waiting for Socket.io's reconnection backoff
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !salonId) return;
+  if (!socket.connected) socket.connect();
+  if (peer && !peer.destroyed && peer.disconnected) peer.reconnect();
+});
+
+// ── SESSION ───────────────────────────────────────────────────────
+// Kept per tab so a reload (or the phone killing the tab) resumes the same membership
+function getSession() {
+  try { return JSON.parse(storageGet(sessionStorage, SESSION_KEY)); } catch { return null; }
+}
+
+function saveSession(session) {
+  storageSet(sessionStorage, SESSION_KEY, session ? JSON.stringify(session) : null);
+}
+
+function startSession(res) {
+  myMemberId = res.memberId;
+  sessionToken = res.token;
+  saveSession({ salonId: res.salonId, memberId: res.memberId, token: res.token, key: salonKey });
+}
+
 // ── ENTER / LEAVE SALON ───────────────────────────────────────────
 async function createSalon() {
   readPseudoInput();
@@ -441,7 +501,7 @@ async function createSalon() {
     await setSalonKey(b64urlEncode(crypto.getRandomValues(new Uint8Array(16))));
     const res = await emitAck('create-salon', { pseudo: myPseudo, auth: authToken });
     if (!res?.ok) throw new Error(res?.error || 'Création impossible.');
-    storageSet(sessionStorage, HOST_SESSION_KEY, JSON.stringify({ salonId: res.salonId, hostToken: res.hostToken, key: salonKey }));
+    startSession(res);
     enterSalon(res.salonId, true, res.members);
   } catch (err) {
     failToHome(err);
@@ -458,8 +518,9 @@ async function joinSalon(invite, { fromLink = false } = {}) {
     await setSalonKey(invite.key);
     const res = await emitAck('join-salon', { salonId: invite.salonId, pseudo: myPseudo, auth: authToken });
     if (!res?.ok) throw new Error(res?.error || 'Connexion impossible.');
+    startSession(res);
     enterSalon(res.salonId, false, res.members);
-    if (res.hostAway) showToast('L\'hôte est momentanément déconnecté.', 5000);
+    if (res.hostAway) showToast('L\'hôte est momentanément en veille.', 5000);
   } catch (err) {
     // A dead invite link must not retry on every page reload
     if (fromLink) history.replaceState(null, '', '/');
@@ -467,42 +528,55 @@ async function joinSalon(invite, { fromLink = false } = {}) {
   }
 }
 
-async function resumeHost(session) {
+// Page (re)loaded with a saved session: take our place back
+async function resumeSession(session) {
+  if (!secureContextOk()) return;
   showScreen('screen-loading');
-  loadingText.textContent = 'Reprise du salon…';
+  loadingText.textContent = 'Reprise de la session…';
+  let res;
   try {
     await setSalonKey(session.key);
-    const res = await emitAck('resume-host', { salonId: session.salonId, hostToken: session.hostToken, pseudo: myPseudo });
-    if (!res?.ok) throw new Error(res?.error || 'Le salon a expiré.');
-    enterSalon(res.salonId, true, res.members);
-    showToast('Salon repris. Ajoutez à nouveau vos fichiers si besoin.', 5000);
+    res = await emitAck('resume-session', { salonId: session.salonId, memberId: session.memberId, token: session.token, pseudo: myPseudo });
   } catch (err) {
-    storageSet(sessionStorage, HOST_SESSION_KEY, null);
-    history.replaceState(null, '', '/');
-    failToHome(err);
+    failToHome(err);   // server unreachable: keep the session, a reload will retry
+    return;
   }
+  if (!res?.ok) {
+    // Our place expired, but the salon may still exist: come back as a new member
+    saveSession(null);
+    joinSalon({ salonId: session.salonId, key: session.key }, { fromLink: true });
+    return;
+  }
+  myMemberId = res.memberId;
+  sessionToken = session.token;
+  enterSalon(res.salonId, res.isHost, res.members);
+  socket.emit('file-sync', { fileIds: [] });   // files shared before the reload are gone
 }
 
-// After a socket reconnect our socket id changed: rejoin and rebuild peer state
-async function rejoinAfterReconnect() {
-  const session = getHostSession();
+// Socket reconnected (screen unlocked, network back): same member, same files
+async function resumeAfterReconnect() {
+  let res;
   try {
-    const res = isHost && session
-      ? await emitAck('resume-host', { salonId, hostToken: session.hostToken, pseudo: myPseudo })
-      : await emitAck('join-salon', { salonId, pseudo: myPseudo, auth: authToken });
-    if (!res?.ok) throw new Error(res?.error || 'Le salon a expiré.');
-    for (const sid of [...members.keys()]) removeMember(sid);
-    for (const m of res.members) addMember(m.socketId, m.pseudo, m.isHost, m.peerId);
-    registerPeer();
-    for (const fileId of myFiles.keys()) announceFile(fileId);
-    showToast('Reconnecté.');
-  } catch (err) {
-    resetSalon();
-    storageSet(sessionStorage, HOST_SESSION_KEY, null);
-    history.replaceState(null, '', '/');
-    document.getElementById('destroyed-msg').textContent = err.message;
-    showScreen('screen-destroyed');
+    res = await emitAck('resume-session', { salonId, memberId: myMemberId, token: sessionToken, pseudo: myPseudo });
+  } catch {
+    return;   // connection dropped again: the next 'connect' retries
   }
+  if (!salonId) return;   // left in the meantime
+  if (!res?.ok) {
+    // Away for too long: our place was released. Try to rejoin as a new member.
+    const invite = { salonId, key: salonKey };
+    resetSalon();
+    saveSession(null);
+    showToast('Votre session a expiré, reconnexion au salon…', 4000);
+    joinSalon(invite, { fromLink: true });
+    return;
+  }
+  isHost = res.isHost;
+  // P2P links did not survive the sleep: rebuild them
+  for (const id of members.keys()) closeConn(id);
+  syncMembers(res.members);
+  registerPeer();
+  socket.emit('file-sync', { fileIds: [...myFiles.keys()] });
 }
 
 function failToHome(err) {
@@ -521,8 +595,8 @@ function enterSalon(sid, host, memberInfos) {
   myFiles.clear();
   remoteFiles.clear();
 
-  addMemberUI(socket.id, myPseudo, host, true);
-  for (const m of memberInfos) addMember(m.socketId, m.pseudo, m.isHost, m.peerId);
+  addMemberUI(myMemberId, myPseudo, host, true);
+  for (const m of memberInfos) addMember(m.memberId, m.pseudo, m.isHost, m.peerId, m.away);
 
   const url = inviteUrl();
   history.replaceState(null, '', url);
@@ -544,9 +618,10 @@ function resetSalon() {
   tabUrls.clear();
   for (const d of [...downloads.values()]) failDownload(d, 'Salon fermé.', { silent: true });
   for (const up of uploads.values()) up.cancelled = true;
-  for (const sid of [...members.keys()]) closeConn(sid);
+  for (const id of [...members.keys()]) closeConn(id);
   if (peer) { try { peer.destroy(); } catch { /* already destroyed */ } peer = null; }
   salonId = null; salonKey = null; cryptoKey = null; authToken = null; isHost = false;
+  myMemberId = null; sessionToken = null;
   members.clear(); myFiles.clear(); remoteFiles.clear();
   membersList.innerHTML = '';
   filesList.innerHTML = '';
@@ -555,37 +630,84 @@ function resetSalon() {
 function leaveSalon() {
   socket.emit('leave-salon');
   resetSalon();
-  storageSet(sessionStorage, HOST_SESSION_KEY, null);
+  saveSession(null);
   history.replaceState(null, '', '/');
   showScreen('screen-home');
 }
 
 // ── MEMBERS ───────────────────────────────────────────────────────
-function addMember(socketId, pseudo, host, peerId) {
-  if (members.has(socketId)) removeMember(socketId);
-  members.set(socketId, { pseudo, isHost: host, peerId, conn: null, retries: 0, retryTimer: null });
-  addMemberUI(socketId, pseudo, host, false);
-  maybeConnect(socketId);
+function addMember(memberId, pseudo, host, peerId, away) {
+  if (members.has(memberId)) removeMember(memberId);
+  members.set(memberId, { pseudo, isHost: host, peerId, away: !!away, conn: null, retries: 0, retryTimer: null });
+  addMemberUI(memberId, pseudo, host, false);
+  setMemberAway(memberId, !!away);
+  maybeConnect(memberId);
 }
 
-function removeMember(socketId) {
-  closeConn(socketId);
-  members.delete(socketId);
-  removeMemberUI(socketId);
-  for (const d of [...downloads.values()]) if (d.from === socketId) failDownload(d, 'L\'expéditeur a quitté le salon.');
-  for (const up of uploads.values()) if (up.to === socketId) up.cancelled = true;
-  for (const [fid, info] of [...remoteFiles]) if (info.senderSocketId === socketId) removeRemoteFile(fid);
+// Brings the local member list in line with the server's after a reconnection
+function syncMembers(list) {
+  const fresh = new Map(list.map(m => [m.memberId, m]));
+  for (const id of [...members.keys()]) if (!fresh.has(id)) removeMember(id);
+  for (const m of list) {
+    const cur = members.get(m.memberId);
+    if (!cur) {
+      addMember(m.memberId, m.pseudo, m.isHost, m.peerId, m.away);
+    } else {
+      cur.peerId = m.peerId;
+      setMemberPseudo(m.memberId, m.pseudo);
+      setMemberAway(m.memberId, m.away);
+    }
+  }
 }
 
-function addMemberUI(socketId, pseudo, isHostMember, isMe) {
+// An away member keeps its place and its files, but can't send or receive until it's back
+function setMemberAway(memberId, away) {
+  const m = members.get(memberId);
+  if (!m) return;
+  m.away = away;
+  if (away) {
+    closeConn(memberId);
+    for (const d of [...downloads.values()]) if (d.from === memberId) failDownload(d, `${m.pseudo} est passé en veille.`);
+    for (const up of uploads.values()) if (up.to === memberId) up.cancelled = true;
+  } else {
+    m.retries = 0;
+    maybeConnect(memberId);
+  }
+  const li = document.getElementById('member-' + memberId);
+  if (li) {
+    li.classList.toggle('away', away);
+    const dot = li.querySelector('.member-online');
+    if (away) dot.title = 'En veille (écran verrouillé ou connexion coupée)';
+    else setMemberLinkUI(memberId, !!m.conn?.open);
+  }
+}
+
+function setMemberPseudo(memberId, pseudo) {
+  const m = members.get(memberId);
+  if (!m || !pseudo) return;
+  m.pseudo = pseudo;
+  const name = document.querySelector(`#member-${CSS.escape(memberId)} .member-name`);
+  if (name) name.textContent = pseudo;
+}
+
+function removeMember(memberId) {
+  closeConn(memberId);
+  members.delete(memberId);
+  removeMemberUI(memberId);
+  for (const d of [...downloads.values()]) if (d.from === memberId) failDownload(d, 'L\'expéditeur a quitté le salon.');
+  for (const up of uploads.values()) if (up.to === memberId) up.cancelled = true;
+  for (const [fid, info] of [...remoteFiles]) if (info.senderMemberId === memberId) removeRemoteFile(fid);
+}
+
+function addMemberUI(memberId, pseudo, isHostMember, isMe) {
   const li = document.createElement('li');
   li.className = 'member-item';
-  li.id = 'member-' + socketId;
+  li.id = 'member-' + memberId;
   const idx = membersList.children.length % AVATAR_CLASSES.length;
   li.innerHTML = `
     <div class="member-avatar ${AVATAR_CLASSES[idx]}">${escapeHtml(avatarInitials(pseudo))}</div>
     <span class="member-name">${escapeHtml(pseudo)}</span>
-    ${isMe ? '<span class="member-you">(vous)</span>' : ''}
+    ${isMe ? '<span class="member-you">(vous)</span>' : '<span class="member-away">en veille</span>'}
     ${isHostMember ? '<span class="member-host-badge">hôte</span>' : ''}
     <div class="member-online${isMe ? '' : ' relay'}" title="${isMe ? 'Vous' : 'Via le relais du serveur (chiffré)'}"></div>
   `;
@@ -593,15 +715,15 @@ function addMemberUI(socketId, pseudo, isHostMember, isMe) {
   updateMemberCount();
 }
 
-function setMemberLinkUI(socketId, direct) {
-  const dot = document.querySelector(`#member-${CSS.escape(socketId)} .member-online`);
+function setMemberLinkUI(memberId, direct) {
+  const dot = document.querySelector(`#member-${CSS.escape(memberId)} .member-online`);
   if (!dot) return;
   dot.title = direct ? 'Connexion P2P directe' : 'Via le relais du serveur (chiffré)';
   dot.classList.toggle('relay', !direct);
 }
 
-function removeMemberUI(socketId) {
-  document.getElementById('member-' + socketId)?.remove();
+function removeMemberUI(memberId) {
+  document.getElementById('member-' + memberId)?.remove();
   updateMemberCount();
 }
 
@@ -636,7 +758,15 @@ async function initPeer() {
   peer.on('disconnected', () => {
     setTimeout(() => { if (peer === current && !current.destroyed) current.reconnect(); }, 2000);
   });
-  peer.on('error', (err) => console.warn('PeerJS error:', err.type, err.message));
+  peer.on('error', (err) => {
+    console.warn('PeerJS error:', err.type, err.message);
+    // Our peer id was released while the phone slept: start over with a new one
+    if (peer === current && ['unavailable-id', 'invalid-id'].includes(err.type)) {
+      try { current.destroy(); } catch { /* already destroyed */ }
+      peer = null;
+      setTimeout(() => { if (salonId && !peer) initPeer().catch(() => {}); }, 1000);
+    }
+  });
 }
 
 function registerPeer() {
@@ -646,41 +776,41 @@ function registerPeer() {
 }
 
 // Exactly one side initiates: the one with the smaller peer id
-function maybeConnect(socketId) {
-  const m = members.get(socketId);
-  if (!m || !m.peerId || !peer?.open || m.conn || m.retryTimer) return;
+function maybeConnect(memberId) {
+  const m = members.get(memberId);
+  if (!m || m.away || !m.peerId || !peer?.open || m.conn || m.retryTimer) return;
   if (peer.id > m.peerId) return;
-  const conn = peer.connect(m.peerId, { reliable: true, serialization: 'raw', metadata: { socketId: socket.id } });
-  attachConn(socketId, conn);
+  const conn = peer.connect(m.peerId, { reliable: true, serialization: 'raw', metadata: { memberId: myMemberId } });
+  attachConn(memberId, conn);
 }
 
 function onIncomingConnection(conn) {
-  const socketId = conn.metadata?.socketId;
-  const m = members.get(socketId);
+  const memberId = conn.metadata?.memberId;
+  const m = members.get(memberId);
   if (!m || (m.peerId && m.peerId !== conn.peer) || conn.serialization !== 'raw') {
     conn.close();
     return;
   }
   m.peerId = conn.peer;
-  if (m.conn && m.conn !== conn) closeConn(socketId);
-  attachConn(socketId, conn);
+  if (m.conn && m.conn !== conn) closeConn(memberId);
+  attachConn(memberId, conn);
 }
 
-function attachConn(socketId, conn) {
-  const m = members.get(socketId);
+function attachConn(memberId, conn) {
+  const m = members.get(memberId);
   m.conn = conn;
   conn.on('open', () => {
     if (m.conn !== conn) return;
     m.retries = 0;
-    setMemberLinkUI(socketId, true);
+    setMemberLinkUI(memberId, true);
   });
-  conn.on('data', (data) => onPeerData(socketId, data));
-  conn.on('close', () => onConnLost(socketId, conn));
-  conn.on('error', (err) => { console.warn('DataConnection error:', err.type || err); onConnLost(socketId, conn); });
+  conn.on('data', (data) => onPeerData(memberId, data));
+  conn.on('close', () => onConnLost(memberId, conn));
+  conn.on('error', (err) => { console.warn('DataConnection error:', err.type || err); onConnLost(memberId, conn); });
 }
 
-function closeConn(socketId) {
-  const m = members.get(socketId);
+function closeConn(memberId) {
+  const m = members.get(memberId);
   if (!m) return;
   clearTimeout(m.retryTimer);
   m.retryTimer = null;
@@ -689,33 +819,33 @@ function closeConn(socketId) {
   if (conn) { try { conn.close(); } catch { /* already closed */ } }
 }
 
-function onConnLost(socketId, conn) {
-  const m = members.get(socketId);
+function onConnLost(memberId, conn) {
+  const m = members.get(memberId);
   if (!m || m.conn !== conn) return;
   m.conn = null;
-  setMemberLinkUI(socketId, false);
+  setMemberLinkUI(memberId, false);
   for (const d of [...downloads.values()]) {
-    if (d.from === socketId && d.via === 'p2p') failDownload(d, 'Connexion P2P perdue.');
+    if (d.from === memberId && d.via === 'p2p') failDownload(d, 'Connexion P2P perdue.');
   }
   // Only the initiator retries, with backoff
   if (peer?.open && m.peerId && peer.id < m.peerId && m.retries < 3) {
     const delay = 2000 * 2 ** m.retries++;
-    m.retryTimer = setTimeout(() => { m.retryTimer = null; maybeConnect(socketId); }, delay);
+    m.retryTimer = setTimeout(() => { m.retryTimer = null; maybeConnect(memberId); }, delay);
   }
 }
 
-function onPeerData(socketId, data) {
+function onPeerData(memberId, data) {
   if (typeof data === 'string') {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
-    handleCtrl(socketId, msg, 'p2p');
+    handleCtrl(memberId, msg, 'p2p');
   } else if (data instanceof ArrayBuffer) {
-    handleChunk(socketId, data).catch(() => {});
+    handleChunk(memberId, data).catch(() => {});
   }
 }
 
-function p2pOpen(socketId) {
-  return !!members.get(socketId)?.conn?.open;
+function p2pOpen(memberId) {
+  return !!members.get(memberId)?.conn?.open;
 }
 
 // ── TRANSPORT ─────────────────────────────────────────────────────
@@ -888,7 +1018,9 @@ function activeDownloadFor(fileId) {
 // Resolves with a Blob when toMemory is true, otherwise saves the file and resolves with null
 async function startDownload(fileId, { toMemory = false, doneText = 'Téléchargé ✓' } = {}) {
   const info = remoteFiles.get(fileId);
-  if (!info || !members.has(info.senderSocketId)) throw new Error('Fichier indisponible.');
+  if (!info || !members.has(info.senderMemberId)) throw new Error('Fichier indisponible.');
+  const sender = members.get(info.senderMemberId);
+  if (sender.away) throw new Error(`${sender.pseudo} est en veille : réessayez quand il sera de retour.`);
   if (activeDownloadFor(fileId)) throw new Error('Téléchargement déjà en cours.');
 
   let sink = null;
@@ -905,12 +1037,12 @@ async function startDownload(fileId, { toMemory = false, doneText = 'Télécharg
     if (!toMemory && info.size > 1024 ** 3) showToast('Fichier volumineux : votre navigateur doit le garder en mémoire.', 5000);
   }
 
-  const via = p2pOpen(info.senderSocketId) ? 'p2p' : 'relay';
+  const via = p2pOpen(info.senderMemberId) ? 'p2p' : 'relay';
   const transferId = randomHex(8);
 
   return new Promise((resolve, reject) => {
     const d = {
-      transferId, fileId, from: info.senderSocketId, via, sink, toMemory, doneText,
+      transferId, fileId, from: info.senderMemberId, via, sink, toMemory, doneText,
       size: null, chunks: null, next: 0, bytes: 0, failed: false,
       queue: Promise.resolve(), timer: null, resolve, reject
     };
@@ -1006,7 +1138,7 @@ async function onFileAnnounced({ from, fileId, meta }) {
   const sender = members.get(from);
   if (!sender || !cryptoKey || !ID_RE.test(fileId) || !(meta instanceof ArrayBuffer)) return;
   const existing = remoteFiles.get(fileId);
-  if (existing && existing.senderSocketId !== from) return;
+  if (existing && existing.senderMemberId !== from) return;
 
   const plain = await decryptBytes(new Uint8Array(meta), textEnc.encode('meta:' + fileId));
   const obj = JSON.parse(textDec.decode(plain));
@@ -1018,7 +1150,7 @@ async function onFileAnnounced({ from, fileId, meta }) {
     name: cleanPath(obj.name),
     size: obj.size,
     mimeType: typeof obj.type === 'string' ? obj.type.slice(0, 128) : '',
-    senderSocketId: from,
+    senderMemberId: from,
     senderPseudo: sender.pseudo
   };
   remoteFiles.set(fileId, info);
@@ -1679,9 +1811,10 @@ function init() {
   updateInstallButton();
 
   const invite = parseInvite(location.href);
-  const session = getHostSession();
-  if (invite && session && session.salonId === invite.salonId && session.key === invite.key && secureContextOk()) {
-    resumeHost(session);
+  const session = getSession();
+  if (invite && session && session.salonId === invite.salonId && session.key === invite.key) {
+    // Reload (or tab killed by the phone): take our place back instead of joining as someone new
+    resumeSession(session);
   } else if (invite) {
     // Opened from an invite link or QR code: join right away with the current pseudo
     joinSalon(invite, { fromLink: true });

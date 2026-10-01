@@ -15,17 +15,18 @@ const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const HOST_GRACE_MS = 30_000;                 // time an absent host has to come back
+// How long a disconnected member (phone locked, network switch…) keeps its place
+const SESSION_GRACE_MS = Number(process.env.SESSION_GRACE_MS) || 15 * 60_000;
 const MAX_CHUNK_BYTES = 80 * 1024;            // 64 KiB payload + tag/IV/GCM overhead
 const MAX_META_BYTES = 4 * 1024;
 const MAX_CTRL_BYTES = 1024;
 const RELAY_BYTES_PER_MIN = Number(process.env.RELAY_BYTES_PER_MIN) || 300 * 1024 * 1024;
 const MAX_SALONS = 10_000;
 
-const ID_RE     = /^[0-9a-f]{16}$/;           // fileId / transferId
+const ID_RE     = /^[0-9a-f]{16}$/;           // fileId / transferId / memberId
 const SALON_RE  = /^[0-9a-f]{8}$/;
 const HEX64_RE  = /^[0-9a-f]{64}$/;           // auth token
-const TOKEN_RE  = /^[0-9a-f]{32}$/;           // host token
+const TOKEN_RE  = /^[0-9a-f]{32}$/;           // member session token
 const PEER_RE   = /^[A-Za-z0-9_-]{1,64}$/;
 
 // ── HTTP ──────────────────────────────────────────────────────────
@@ -146,11 +147,15 @@ function clientIp(socket) {
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────
-// salonId -> { id, hostId, hostToken, authHash, members: Map<socketId, {pseudo, peerId}>, hostTimer }
+// A member keeps a stable memberId across reconnections (phone locked, network switch,
+// page reload). Its socket can come and go: while socketId is null the member is "away".
+// salonId -> { id, hostId, authHash, members: Map<memberId, Member> }
+// Member: { pseudo, peerId, token, socketId, awayTimer }
 const salons = new Map();
 
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest();
 const safeEqual = (a, b) => a.length === b.length && crypto.timingSafeEqual(a, b);
+const randomHex = (bytes) => crypto.randomBytes(bytes).toString('hex');
 
 function cleanPseudo(p) {
   if (typeof p !== 'string') return null;
@@ -165,53 +170,87 @@ function salonOf(socket) {
 
 function memberList(salon, exceptId) {
   const list = [];
-  for (const [sid, info] of salon.members) {
-    if (sid !== exceptId) list.push({ socketId: sid, pseudo: info.pseudo, peerId: info.peerId, isHost: sid === salon.hostId });
+  for (const [id, m] of salon.members) {
+    if (id !== exceptId) {
+      list.push({ memberId: id, pseudo: m.pseudo, peerId: m.peerId, isHost: id === salon.hostId, away: !m.socketId });
+    }
   }
   return list;
 }
 
-// Returns the target socket only if it belongs to the sender's salon
+// Returns the target's current socket only if it belongs to the sender's salon and is online
 function memberSocket(socket, to) {
   const salon = salonOf(socket);
-  if (!salon || typeof to !== 'string' || to === socket.id || !salon.members.has(to)) return null;
-  return io.sockets.sockets.get(to) || null;
+  if (!salon || typeof to !== 'string' || to === socket.data.memberId) return null;
+  const target = salon.members.get(to);
+  return target?.socketId ? io.sockets.sockets.get(target.socketId) || null : null;
 }
 
-function addToSalon(socket, salon, pseudo) {
-  salon.members.set(socket.id, { pseudo, peerId: null });
+function attach(socket, salon, memberId) {
+  const member = salon.members.get(memberId);
+  clearTimeout(member.awayTimer);
+  member.awayTimer = null;
+  member.socketId = socket.id;
   socket.join(salon.id);
   socket.data.salonId = salon.id;
-  socket.data.pseudo = pseudo;
+  socket.data.memberId = memberId;
+}
+
+function detach(socket) {
+  const salon = salonOf(socket);
+  if (salon) socket.leave(salon.id);
+  socket.data.salonId = null;
+  socket.data.memberId = null;
+}
+
+function addMember(socket, salon, pseudo) {
+  const memberId = randomHex(8);
+  const token = randomHex(16);
+  salon.members.set(memberId, { pseudo, peerId: null, token, socketId: null, awayTimer: null });
+  attach(socket, salon, memberId);
+  return { memberId, token };
 }
 
 function destroySalon(salon, reason) {
-  clearTimeout(salon.hostTimer);
   io.to(salon.id).emit('salon-destroyed', { reason });
-  for (const sid of salon.members.keys()) {
-    const s = io.sockets.sockets.get(sid);
-    if (s) { s.leave(salon.id); s.data.salonId = null; }
+  for (const m of salon.members.values()) {
+    clearTimeout(m.awayTimer);
+    const s = m.socketId && io.sockets.sockets.get(m.socketId);
+    if (s) detach(s);
   }
   salons.delete(salon.id);
 }
 
-function leaveSalon(socket, explicit) {
-  const salon = salonOf(socket);
-  if (!salon) return;
-  salon.members.delete(socket.id);
-  socket.leave(salon.id);
-  socket.data.salonId = null;
+function removeMember(salon, memberId, reason) {
+  const member = salon.members.get(memberId);
+  if (!member) return;
+  if (memberId === salon.hostId) { destroySalon(salon, reason); return; }
+  clearTimeout(member.awayTimer);
+  salon.members.delete(memberId);
+  io.to(salon.id).emit('member-left', { memberId, pseudo: member.pseudo });
+}
 
-  if (salon.hostId === socket.id) {
-    if (explicit) { destroySalon(salon, 'L\'hôte a fermé le salon.'); return; }
-    // Host dropped (refresh, network): give them a chance to come back
-    salon.hostId = null;
-    io.to(salon.id).emit('member-left', { socketId: socket.id, pseudo: socket.data.pseudo });
-    io.to(salon.id).emit('host-away', { graceMs: HOST_GRACE_MS });
-    salon.hostTimer = setTimeout(() => destroySalon(salon, 'L\'hôte a quitté le salon.'), HOST_GRACE_MS);
-    return;
-  }
-  io.to(salon.id).emit('member-left', { socketId: socket.id, pseudo: socket.data.pseudo });
+// Explicit "Quitter": immediate
+function leaveSalon(socket) {
+  const salon = salonOf(socket);
+  const memberId = socket.data.memberId;
+  if (!salon || !memberId) return;
+  detach(socket);
+  removeMember(salon, memberId, 'L\'hôte a fermé le salon.');
+}
+
+// Connection lost (phone locked, network switch, reload): the member stays, marked as away
+function markAway(socket) {
+  const salon = salonOf(socket);
+  const memberId = socket.data.memberId;
+  const member = salon?.members.get(memberId);
+  if (!member || member.socketId !== socket.id) return;
+  detach(socket);
+  member.socketId = null;
+  io.to(salon.id).emit('member-away', { memberId, graceMs: SESSION_GRACE_MS });
+  member.awayTimer = setTimeout(() => {
+    removeMember(salon, memberId, 'L\'hôte n\'est pas revenu à temps.');
+  }, SESSION_GRACE_MS);
 }
 
 // ── EVENTS ────────────────────────────────────────────────────────
@@ -228,14 +267,14 @@ io.on('connection', (socket) => {
     if (!createLimiter(ip)) return ack({ ok: false, error: 'Trop de salons créés, réessayez dans une minute.' });
     if (salons.size >= MAX_SALONS) return ack({ ok: false, error: 'Serveur saturé, réessayez plus tard.' });
 
-    leaveSalon(socket, true);
+    leaveSalon(socket);
     let id;
-    do { id = crypto.randomBytes(4).toString('hex'); } while (salons.has(id));
-    const hostToken = crypto.randomBytes(16).toString('hex');
-    const salon = { id, hostId: socket.id, hostToken, authHash: sha256(p.auth), members: new Map(), hostTimer: null };
+    do { id = randomHex(4); } while (salons.has(id));
+    const salon = { id, hostId: null, authHash: sha256(p.auth), members: new Map() };
     salons.set(id, salon);
-    addToSalon(socket, salon, pseudo);
-    ack({ ok: true, salonId: id, hostToken, members: [] });
+    const { memberId, token } = addMember(socket, salon, pseudo);
+    salon.hostId = memberId;
+    ack({ ok: true, salonId: id, memberId, token, isHost: true, members: [] });
   });
 
   on('join-salon', (p, ack) => {
@@ -246,43 +285,56 @@ io.on('connection', (socket) => {
     if (!pseudo || !salon || !HEX64_RE.test(p?.auth) || !safeEqual(sha256(p.auth), salon.authHash)) {
       return ack({ ok: false, error: 'Salon introuvable ou lien invalide.' });
     }
-    if (salon.id !== socket.data.salonId) leaveSalon(socket, true);
-    addToSalon(socket, salon, pseudo);
-    ack({ ok: true, salonId: salon.id, members: memberList(salon, socket.id), hostAway: !salon.hostId });
-    socket.to(salon.id).emit('member-joined', { socketId: socket.id, pseudo, isHost: false });
+    leaveSalon(socket);
+    const { memberId, token } = addMember(socket, salon, pseudo);
+    const host = salon.members.get(salon.hostId);
+    ack({ ok: true, salonId: salon.id, memberId, token, isHost: false, members: memberList(salon, memberId), hostAway: !host?.socketId });
+    socket.to(salon.id).emit('member-joined', { memberId, pseudo, isHost: false });
   });
 
-  on('resume-host', (p, ack) => {
+  // Takes back an existing identity after a disconnection (same memberId, same files)
+  on('resume-session', (p, ack) => {
     if (typeof ack !== 'function') return;
     if (!joinLimiter(ip)) return ack({ ok: false, error: 'Trop de tentatives, réessayez dans une minute.' });
-    const pseudo = cleanPseudo(p?.pseudo);
     const salon = SALON_RE.test(p?.salonId) ? salons.get(p.salonId) : null;
-    if (!pseudo || !salon || salon.hostId || !TOKEN_RE.test(p?.hostToken) ||
-        !safeEqual(Buffer.from(p.hostToken), Buffer.from(salon.hostToken))) {
-      return ack({ ok: false, error: 'Le salon a expiré.' });
+    const member = salon && ID_RE.test(p?.memberId) ? salon.members.get(p.memberId) : null;
+    if (!member || !TOKEN_RE.test(p?.token) || !safeEqual(Buffer.from(p.token), Buffer.from(member.token))) {
+      return ack({ ok: false, error: 'Session expirée.' });
     }
-    clearTimeout(salon.hostTimer);
-    salon.hostTimer = null;
-    salon.hostId = socket.id;
-    addToSalon(socket, salon, pseudo);
-    ack({ ok: true, salonId: salon.id, members: memberList(salon, socket.id) });
-    socket.to(salon.id).emit('member-joined', { socketId: socket.id, pseudo, isHost: true });
+    const memberId = p.memberId;
+    if (socket.data.memberId !== memberId) leaveSalon(socket);
+
+    // The old connection may not be detected as dead yet (typical after a phone sleep)
+    const old = member.socketId && member.socketId !== socket.id ? io.sockets.sockets.get(member.socketId) : null;
+    if (old) {
+      detach(old);
+      old.emit('session-replaced');
+      old.disconnect(true);
+    }
+    const wasAway = !member.socketId || !!old;
+    const pseudo = cleanPseudo(p?.pseudo);
+    if (pseudo) member.pseudo = pseudo;
+    attach(socket, salon, memberId);
+
+    const isHost = memberId === salon.hostId;
+    ack({ ok: true, salonId: salon.id, memberId, isHost, members: memberList(salon, memberId) });
+    if (wasAway) socket.to(salon.id).emit('member-back', { memberId, pseudo: member.pseudo, isHost });
   });
 
-  on('leave-salon', () => leaveSalon(socket, true));
+  on('leave-salon', () => leaveSalon(socket));
 
   on('register-peer', (p) => {
     const salon = salonOf(socket);
     if (!salon || !PEER_RE.test(p?.peerId)) return;
-    salon.members.get(socket.id).peerId = p.peerId;
-    socket.to(salon.id).emit('peer-registered', { socketId: socket.id, peerId: p.peerId });
+    salon.members.get(socket.data.memberId).peerId = p.peerId;
+    socket.to(salon.id).emit('peer-registered', { memberId: socket.data.memberId, peerId: p.peerId });
   });
 
   // File metadata is encrypted client-side: the server only forwards opaque bytes
   on('file-announce', (p) => {
     const salon = salonOf(socket);
     if (!salon || !ID_RE.test(p?.fileId) || !Buffer.isBuffer(p.meta) || p.meta.length > MAX_META_BYTES) return;
-    const payload = { from: socket.id, fileId: p.fileId, meta: p.meta };
+    const payload = { from: socket.data.memberId, fileId: p.fileId, meta: p.meta };
     if (p.to !== undefined) {
       const target = memberSocket(socket, p.to);
       if (target) target.emit('file-announce', payload);
@@ -294,7 +346,15 @@ io.on('connection', (socket) => {
   on('file-remove', (p) => {
     const salon = salonOf(socket);
     if (!salon || !ID_RE.test(p?.fileId)) return;
-    socket.to(salon.id).emit('file-remove', { from: socket.id, fileId: p.fileId });
+    socket.to(salon.id).emit('file-remove', { from: socket.data.memberId, fileId: p.fileId });
+  });
+
+  // After a reload the member's files are gone: others drop whatever is no longer listed
+  on('file-sync', (p) => {
+    const salon = salonOf(socket);
+    const ids = Array.isArray(p?.fileIds) ? p.fileIds : null;
+    if (!salon || !ids || ids.length > 5000 || !ids.every(id => ID_RE.test(id))) return;
+    socket.to(salon.id).emit('file-sync', { from: socket.data.memberId, fileIds: ids });
   });
 
   // ── RELAY (fallback when WebRTC cannot connect) ──
@@ -302,7 +362,7 @@ io.on('connection', (socket) => {
     const target = memberSocket(socket, p?.to);
     if (!target || !p.msg || typeof p.msg !== 'object') return;
     if (JSON.stringify(p.msg).length > MAX_CTRL_BYTES) return;
-    target.emit('relay-ctrl', { from: socket.id, msg: p.msg });
+    target.emit('relay-ctrl', { from: socket.data.memberId, msg: p.msg });
   });
 
   on('relay-chunk', (p, ack) => {
@@ -311,12 +371,12 @@ io.on('connection', (socket) => {
     if (!target || !Buffer.isBuffer(p.data) || p.data.length > MAX_CHUNK_BYTES) return ack({ ok: false });
     if (!relayLimiter(ip, p.data.length)) return ack({ ok: false, error: 'rate' });
     // Ack the sender only once the receiver has processed the chunk (end-to-end backpressure)
-    target.timeout(30_000).emit('relay-chunk', { from: socket.id, data: p.data }, (err, res) => {
+    target.timeout(30_000).emit('relay-chunk', { from: socket.data.memberId, data: p.data }, (err, res) => {
       ack({ ok: !err && res?.ok === true });
     });
   });
 
-  on('disconnect', () => leaveSalon(socket, false));
+  on('disconnect', () => markAway(socket));
 });
 
 server.listen(PORT, HOST, () => {

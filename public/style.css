@@ -426,6 +426,11 @@ html, body {
   animation: pulse 2.5s ease infinite;
 }
 .member-online.relay { background: var(--amber); }
+.member-away { display: none; font-size: 10px; color: var(--text-3); }
+.member-item.away .member-away { display: inline; }
+.member-item.away .member-name,
+.member-item.away .member-avatar { opacity: 0.45; }
+.member-item.away .member-online { background: var(--text-3); animation: none; }
 @keyframes pulse {
   0%,100% { opacity: 1; }
   50% { opacity: 0.4; }

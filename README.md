@@ -114,6 +114,7 @@ Poussez sur `main`, puis relancez **la même commande** : le script récupère l
 | `TRUST_PROXY` | — | `1` derrière un reverse proxy (IP client lue dans `X-Forwarded-For`) |
 | `ALLOWED_ORIGINS` | — | Origines supplémentaires autorisées pour Socket.io (séparées par des virgules). Par défaut, seule l'origine du site est acceptée |
 | `RELAY_BYTES_PER_MIN` | `314572800` (300 Mo) | Débit maximal du relais par adresse IP |
+| `SESSION_GRACE_MS` | `900000` (15 min) | Temps pendant lequel un membre déconnecté (téléphone verrouillé…) garde sa place |
 | `TURN_URLS` | — | Serveur(s) TURN, ex. `turn:turn.exemple.com:3478` (séparés par des virgules) |
 | `TURN_SECRET` | — | Secret partagé coturn (`use-auth-secret`) : chaque visiteur reçoit des identifiants valables 12 h |
 | `TURN_USERNAME` / `TURN_CREDENTIAL` | — | Identifiants TURN fixes (si pas de `TURN_SECRET`) |
@@ -146,8 +147,10 @@ Si la connexion WebRTC directe échoue (NAT strict, pare-feu), les morceaux chif
 
 ### Cycle de vie du salon
 
-- Si l'hôte **quitte** le salon, celui-ci est détruit pour tout le monde.
-- Si l'hôte **recharge la page** ou perd la connexion, il a 30 secondes pour revenir. Le salon est repris automatiquement, mais les fichiers doivent être ajoutés de nouveau.
+- Si l'hôte **quitte** le salon (bouton « Quitter »), celui-ci est détruit pour tout le monde.
+- Chaque membre a une **identité stable** (identifiant + jeton de session gardés dans l'onglet). Si sa connexion se coupe (téléphone verrouillé, changement de réseau, page rechargée), il passe **« en veille »** au lieu de quitter : il garde sa place, et ses fichiers restent listés.
+- À son retour, il reprend sa place automatiquement. Après une veille, ses fichiers sont toujours disponibles. Après un rechargement de la page, ils disparaissent de la liste, car le navigateur ne les a plus.
+- Passé le délai de grâce (`SESSION_GRACE_MS`, 15 min par défaut), le membre est retiré ; s'il s'agit de l'hôte, le salon est fermé. Un membre qui revient après ce délai rejoint automatiquement le salon comme nouveau membre, s'il existe encore.
 
 ---
 
