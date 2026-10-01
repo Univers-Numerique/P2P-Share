@@ -473,7 +473,32 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !salonId) return;
   if (!socket.connected) socket.connect();
   if (peer && !peer.destroyed && peer.disconnected) peer.reconnect();
+  updateWakeLock();   // the browser drops the wake lock whenever the page is hidden
 });
+
+// ── SCREEN WAKE LOCK ──────────────────────────────────────────────
+// Mobile browsers freeze the page when the screen turns off, which kills transfers:
+// keep the screen on while anything is being sent or received.
+let wakeLock = null;
+let wakeLockPending = false;
+
+async function updateWakeLock() {
+  const busy = uploads.size > 0 || downloads.size > 0;
+  if (!('wakeLock' in navigator)) return;
+  if (busy && !wakeLock && !wakeLockPending && document.visibilityState === 'visible') {
+    wakeLockPending = true;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch { /* refused (battery saver…): transfers still work, the screen may just turn off */ }
+    wakeLockPending = false;
+    if (!(uploads.size > 0 || downloads.size > 0)) updateWakeLock();   // finished meanwhile
+  } else if (!busy && wakeLock) {
+    const lock = wakeLock;
+    wakeLock = null;
+    lock.release().catch(() => {});
+  }
+}
 
 // ── SESSION ───────────────────────────────────────────────────────
 // Kept per tab so a reload (or the phone killing the tab) resumes the same membership
@@ -958,6 +983,7 @@ async function sendFile(to, via, transferId, fileId) {
   }
   const up = { fileId, to, via, pseudo: members.get(to)?.pseudo || '?', pct: 0, cancelled: false };
   uploads.set(transferId, up);
+  updateWakeLock();
   renderUploadStatus(fileId);
 
   try {
@@ -986,6 +1012,7 @@ async function sendFile(to, via, transferId, fileId) {
     if (!up.cancelled) trySendCtrl(to, via, { t: 'err', tid: transferId });
   } finally {
     uploads.delete(transferId);
+    updateWakeLock();
     renderUploadStatus(fileId);
   }
 }
@@ -1047,6 +1074,7 @@ async function startDownload(fileId, { toMemory = false, doneText = 'Télécharg
       queue: Promise.resolve(), timer: null, resolve, reject
     };
     downloads.set(transferId, d);
+    updateWakeLock();
     armTimeout(d);
     setDownloadUI(fileId, 'active', via === 'relay' ? 'Via relais…' : 'Téléchargement…');
     try {
@@ -1088,6 +1116,7 @@ async function finishDownload(d) {
   if (d.chunks === null || d.next !== d.chunks || d.bytes !== d.size) throw new Error('Fichier incomplet.');
   clearTimeout(d.timer);
   downloads.delete(d.transferId);
+  updateWakeLock();
   const info = remoteFiles.get(d.fileId);
   const blob = await d.sink.close('application/octet-stream');
   if (blob && !d.toMemory) saveBlob(blob, baseName(info?.name || 'fichier'));
@@ -1111,6 +1140,7 @@ function failDownload(d, reason, { silent = false } = {}) {
   d.failed = true;
   clearTimeout(d.timer);
   downloads.delete(d.transferId);
+  updateWakeLock();
   try { d.sink.abort(); } catch { /* ignore */ }
   trySendCtrl(d.from, d.via, { t: 'cancel', tid: d.transferId });
   if (!silent) {

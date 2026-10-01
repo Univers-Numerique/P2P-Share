@@ -169,6 +169,7 @@ Si la connexion WebRTC directe échoue (NAT strict, pare-feu), les morceaux chif
 - « Tout télécharger (.zip) » : récupère tous les fichiers du salon dans une archive
 - Retrait automatique des fichiers d'un membre qui se déconnecte
 - Reconnexion automatique après une coupure réseau
+- Écran maintenu allumé pendant un envoi ou une réception (Screen Wake Lock), pour que la mise en veille automatique du téléphone ne coupe pas le transfert
 - PWA installable : bouton « Installer l'application » (Chrome, Edge, Android), instructions pour iPhone/iPad, icône adaptative Android, Service Worker « réseau d'abord ». L'installation exige un certificat HTTPS reconnu par l'appareil : un certificat auto-signé ne suffit pas.
 - En-têtes de sécurité (CSP, nosniff, no-referrer)
 
