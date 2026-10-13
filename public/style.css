@@ -1124,8 +1124,20 @@ a.btn-preview { text-decoration: none; }
 .msg.grouped .msg-avatar { visibility: hidden; }
 .msg:not(.grouped) { margin-top: 6px; }
 
-/* Toasts sit above the composer */
-.toast { bottom: 84px; }
+/* Toasts drop from the top of the thread: at the bottom they covered the newest
+   message and its buttons for several seconds. */
+.toast {
+  top: 66px; bottom: auto;
+  transform: translateX(-50%) translateY(-8px);
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
 @media (max-width: 700px) {
-  .toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  /* Full width: centred with a transform, a toast could only use half of a phone screen */
+  .toast {
+    top: calc(108px + env(safe-area-inset-top)); bottom: auto;
+    left: 12px; right: 12px; max-width: none;
+    justify-content: space-between; text-align: left;
+    transform: translateY(-8px);
+  }
+  .toast.show { transform: translateY(0); }
 }

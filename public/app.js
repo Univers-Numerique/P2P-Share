@@ -417,7 +417,9 @@ function initSocket() {
       addMember(memberId, pseudo, host, null, false);
       addSystemLine(`${pseudo} a rejoint le salon`);
     }
-    // Their page may have been reloaded: make sure they know our files
+    // They missed what happened while away (or reloaded): tell them what we share now.
+    // The list first, so anything we deleted meanwhile disappears on their side.
+    socket.emit('file-sync', { fileIds: [...myFiles.keys()], to: memberId });
     for (const fileId of myFiles.keys()) announceFile(fileId, memberId);
   });
 
@@ -443,9 +445,11 @@ function initSocket() {
     removeRemoteFile(fileId);
   });
 
-  // A member lists the files it still has (after a reload): drop the others
+  // A member lists what it currently shares: whatever we still show from it and is not
+  // listed was deleted, or lost in a reload, while one of us was disconnected
   socket.on('file-sync', ({ from, fileIds }) => {
-    releaseSenderItems(from, new Set(fileIds));
+    if (!members.has(from) || !Array.isArray(fileIds)) return;
+    syncSenderItems(from, new Set(fileIds));
   });
 
   socket.on('salon-destroyed', ({ reason }) => {
@@ -527,6 +531,7 @@ function saveSession(session) {
 function startSession(res) {
   lamport = 0;
   storageSet(sessionStorage, CLOCK_KEY, null);
+  observeSeq(res.clock || 0);   // start numbering after what the salon already contains
   myMemberId = res.memberId;
   sessionToken = res.token;
   saveSession({ salonId: res.salonId, memberId: res.memberId, token: res.token, key: salonKey });
@@ -592,6 +597,7 @@ async function resumeSession(session) {
   sessionToken = session.token;
   // Resume the thread clock, so a message sent right after the reload still goes last
   lamport = Number.parseInt(storageGet(sessionStorage, CLOCK_KEY), 10) || 0;
+  observeSeq(res.clock || 0);
   enterSalon(res.salonId, res.isHost, res.members);
   restoreTexts();
   // Files shared before the reload are gone (the browser lost them); texts were kept
@@ -621,7 +627,19 @@ async function resumeAfterReconnect() {
   for (const id of members.keys()) closeConn(id);
   syncMembers(res.members);
   registerPeer();
+
+  // Anything we shared while the connection was down never reached the others (the server
+  // refuses announcements from a socket that has not taken its place back yet). Number those
+  // items after everything the salon saw meanwhile, then send them.
+  observeSeq(res.clock || 0);
+  const unsent = [...myFiles].filter(([, fd]) => !fd.delivered).map(([fileId]) => fileId);
+  for (const fileId of unsent) {
+    myFiles.get(fileId).seq = nextSeq();
+    reorderItem(fileId);
+  }
+  if (unsent.length) persistTexts();
   socket.emit('file-sync', { fileIds: [...myFiles.keys()] });
+  for (const fileId of unsent) announceFile(fileId).catch(err => console.warn('announce:', err));
 }
 
 function failToHome(err) {
@@ -1193,7 +1211,17 @@ async function announceFile(fileId, to) {
     : { name: fd.name, size: fd.size, type: fd.mimeType, at: fd.at, seq: fd.seq };
   const plain = textEnc.encode(JSON.stringify(payload));
   const meta = await encryptBytes(plain, textEnc.encode('meta:' + fileId));
-  socket.emit('file-announce', to ? { fileId, meta: meta.buffer, to } : { fileId, meta: meta.buffer });
+  const seq = fd.seq;
+  if (to) {
+    socket.emit('file-announce', { fileId, meta: meta.buffer, seq, to });
+    return;
+  }
+  // Broadcast: remember whether the server really relayed it. While the connection is down
+  // (or not back in the salon yet) it is not, and resumeAfterReconnect() sends it again.
+  socket.timeout(10_000).emit('file-announce', { fileId, meta: meta.buffer, seq }, (err, res) => {
+    const current = myFiles.get(fileId);
+    if (!err && res?.ok && current && current.seq === seq) current.delivered = true;
+  });
 }
 
 async function onFileAnnounced({ from, fileId, meta }) {
@@ -1231,8 +1259,9 @@ async function onFileAnnounced({ from, fileId, meta }) {
   }
   remoteFiles.set(fileId, info);
   if (existing) {
-    // Re-announced (sender came back): available again
+    // Re-announced (sender came back): available again, possibly renumbered
     if (existing.gone) setItemGone(fileId, false);
+    if (existing.seq !== seq) reorderItem(fileId);
   } else {
     clearTyping(from);
     renderItem(fileId);
@@ -1306,13 +1335,22 @@ function removeRemoteFile(fileId) {
   updateFilesUI();
 }
 
-// The sender left (or reloaded and lost the file): the thread keeps its history.
-// Messages stay readable; a file can no longer be fetched unless we already have a copy.
-function releaseSenderItems(memberId, keepIds = null) {
+// The sender left: the thread keeps its history. Messages stay readable; a file can no
+// longer be fetched unless we already have a copy.
+function releaseSenderItems(memberId) {
   for (const [fileId, info] of remoteFiles) {
-    if (info.senderMemberId !== memberId || info.kind === 'text') continue;
-    if (keepIds && keepIds.has(fileId)) continue;
-    setItemGone(fileId, true);
+    if (info.senderMemberId === memberId && info.kind !== 'text') setItemGone(fileId, true);
+  }
+  updateFilesUI();
+}
+
+// The sender is here and tells what it shares now. What is missing from the list was deleted
+// (messages) or lost in a page reload (files) while one of us was disconnected.
+function syncSenderItems(memberId, keepIds) {
+  for (const [fileId, info] of [...remoteFiles]) {
+    if (info.senderMemberId !== memberId || keepIds.has(fileId)) continue;
+    if (info.kind === 'text') removeRemoteFile(fileId);
+    else setItemGone(fileId, true);
   }
   updateFilesUI();
 }
@@ -1492,6 +1530,23 @@ function insertInOrder(el, key) {
   else filesList.prepend(el);
 }
 
+function itemKey(fileId) {
+  const own = myFiles.has(fileId);
+  const info = myFiles.get(fileId) || remoteFiles.get(fileId);
+  return { seq: info.seq, rank: 0, tie: `${own ? myMemberId : info.senderMemberId}:${fileId}` };
+}
+
+// An item got a new sequence number (sent again after a disconnection): move it to its place
+function reorderItem(fileId) {
+  const el = document.getElementById('fc-' + fileId);
+  if (!el || !(myFiles.has(fileId) || remoteFiles.has(fileId))) return;
+  const stick = isNearBottom();
+  el.remove();
+  insertInOrder(el, itemKey(fileId));
+  regroupThread();
+  if (stick) scrollToBottom();
+}
+
 // Adds an element to the thread and handles scrolling / unread counters
 function addToThread(el, key, { own = false, quiet = false } = {}) {
   const stick = own || isNearBottom();
@@ -1565,7 +1620,7 @@ function renderItem(fileId, { quiet = false } = {}) {
   }
 
   row.dataset.at = info.at;
-  addToThread(row, { seq: info.seq, rank: 0, tie: `${own ? myMemberId : info.senderMemberId}:${fileId}` }, { own, quiet });
+  addToThread(row, itemKey(fileId), { own, quiet });
   if (info.kind !== 'text') {
     updatePreviewButton(fileId);
     updateThumb(fileId);

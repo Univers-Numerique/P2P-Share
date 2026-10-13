@@ -283,11 +283,11 @@ io.on('connection', (socket) => {
     leaveSalon(socket);
     let id;
     do { id = randomHex(4); } while (salons.has(id));
-    const salon = { id, hostId: null, authHash: sha256(p.auth), members: new Map() };
+    const salon = { id, hostId: null, authHash: sha256(p.auth), members: new Map(), clock: 0 };
     salons.set(id, salon);
     const { memberId, token } = addMember(socket, salon, pseudo);
     salon.hostId = memberId;
-    ack({ ok: true, salonId: id, memberId, token, isHost: true, members: [] });
+    ack({ ok: true, salonId: id, memberId, token, isHost: true, members: [], clock: 0 });
   });
 
   on('join-salon', (p, ack) => {
@@ -301,7 +301,7 @@ io.on('connection', (socket) => {
     leaveSalon(socket);
     const { memberId, token } = addMember(socket, salon, pseudo);
     const host = salon.members.get(salon.hostId);
-    ack({ ok: true, salonId: salon.id, memberId, token, isHost: false, members: memberList(salon, memberId), hostAway: !host?.socketId });
+    ack({ ok: true, salonId: salon.id, memberId, token, isHost: false, members: memberList(salon, memberId), hostAway: !host?.socketId, clock: salon.clock });
     socket.to(salon.id).emit('member-joined', { memberId, pseudo, isHost: false });
   });
 
@@ -330,7 +330,7 @@ io.on('connection', (socket) => {
     attach(socket, salon, memberId);
 
     const isHost = memberId === salon.hostId;
-    ack({ ok: true, salonId: salon.id, memberId, isHost, members: memberList(salon, memberId) });
+    ack({ ok: true, salonId: salon.id, memberId, isHost, members: memberList(salon, memberId), clock: salon.clock });
     if (wasAway) socket.to(salon.id).emit('member-back', { memberId, pseudo: member.pseudo, isHost });
   });
 
@@ -344,9 +344,18 @@ io.on('connection', (socket) => {
   });
 
   // File metadata is encrypted client-side: the server only forwards opaque bytes
-  on('file-announce', (p) => {
+  // The ack tells the sender the announcement was really relayed: one that arrives while the
+  // socket has not (re)taken its place in a salon is refused, and the client sends it again.
+  on('file-announce', (p, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
     const salon = salonOf(socket);
-    if (!salon || !ID_RE.test(p?.fileId) || !Buffer.isBuffer(p.meta) || p.meta.length > MAX_META_BYTES) return;
+    if (!salon || !ID_RE.test(p?.fileId) || !Buffer.isBuffer(p.meta) || p.meta.length > MAX_META_BYTES) {
+      return reply({ ok: false });
+    }
+    reply({ ok: true });
+    // `seq` orders the thread (a plain counter, no content). The salon remembers the highest one,
+    // so a member coming back can number its next message after everything it missed.
+    if (Number.isSafeInteger(p.seq) && p.seq > salon.clock && p.seq < 1e12) salon.clock = p.seq;
     const payload = { from: socket.data.memberId, fileId: p.fileId, meta: p.meta };
     if (p.to !== undefined) {
       const target = memberSocket(socket, p.to);
@@ -362,12 +371,19 @@ io.on('connection', (socket) => {
     socket.to(salon.id).emit('file-remove', { from: socket.data.memberId, fileId: p.fileId });
   });
 
-  // After a reload the member's files are gone: others drop whatever is no longer listed
+  // A member lists what it currently shares (after a reconnection, a reload, or for someone
+  // coming back): receivers drop whatever is no longer listed
   on('file-sync', (p) => {
     const salon = salonOf(socket);
     const ids = Array.isArray(p?.fileIds) ? p.fileIds : null;
     if (!salon || !ids || ids.length > 5000 || !ids.every(id => ID_RE.test(id))) return;
-    socket.to(salon.id).emit('file-sync', { from: socket.data.memberId, fileIds: ids });
+    const payload = { from: socket.data.memberId, fileIds: ids };
+    if (p.to !== undefined) {
+      const target = memberSocket(socket, p.to);
+      if (target) target.emit('file-sync', payload);
+    } else {
+      socket.to(salon.id).emit('file-sync', payload);
+    }
   });
 
   // "X is typing": no content, just a hint forwarded to the salon (at most once per second)
