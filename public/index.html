@@ -173,50 +173,54 @@
       <!-- MAIN -->
       <main class="salon-main">
         <div class="main-toolbar">
-          <div class="toolbar-left">
-            <button class="btn-add-files" id="btn-add-files">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              Ajouter des fichiers
-            </button>
-            <button class="btn-add-folder" id="btn-add-folder">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-              Dossier
-            </button>
-            <button class="btn-add-folder" id="btn-add-text" title="Partager un texte ou un lien">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              Texte
-            </button>
-          </div>
-          <div class="toolbar-right">
-            <div class="files-count" id="files-count">0 fichier</div>
-            <button class="btn-zip" id="btn-zip" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              Tout télécharger (.zip)
-            </button>
-          </div>
-          <input type="file" id="file-input" multiple hidden />
-          <input type="file" id="folder-input" multiple hidden webkitdirectory />
+          <div class="files-count" id="files-count">0 élément</div>
+          <button class="btn-zip" id="btn-zip" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Tout télécharger (.zip)
+          </button>
+          <input type="file" id="file-input" multiple hidden aria-label="Fichiers à partager" />
+          <input type="file" id="folder-input" multiple hidden webkitdirectory aria-label="Dossier à partager" />
         </div>
 
-        <!-- DROP ZONE -->
-        <div class="drop-zone" id="drop-zone">
-          <div class="drop-icon">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <!-- THREAD: messages and files, oldest first -->
+        <div class="feed-wrap">
+          <div class="files-list" id="files-list" role="log" aria-label="Fil de discussion"></div>
+
+          <div class="empty-state" id="empty-state">
+            <div class="empty-icon">
+              <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <div class="empty-title">Le fil est vide</div>
+            <div class="empty-sub">Écrivez un message, collez un lien ou déposez un fichier.</div>
           </div>
-          <div class="drop-title">Glissez vos fichiers ici</div>
-          <div class="drop-sub">ou utilisez le bouton ci-dessus</div>
+
+          <div class="drop-zone" id="drop-zone">
+            <div class="drop-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div class="drop-title">Déposez pour partager</div>
+          </div>
+
+          <button class="new-msg-pill" id="new-msg-pill" hidden>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+            <span id="new-msg-count"></span>
+          </button>
         </div>
 
-        <!-- FILES LIST -->
-        <div class="files-list" id="files-list"></div>
+        <div class="typing-line" id="typing-line" aria-live="polite"></div>
 
-        <!-- EMPTY STATE -->
-        <div class="empty-state" id="empty-state">
-          <div class="empty-icon">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-          </div>
-          <div class="empty-title">Rien de partagé pour l'instant</div>
-          <div class="empty-sub">Ajoutez des fichiers, du texte ou des liens pour les partager avec les membres connectés.</div>
+        <!-- COMPOSER -->
+        <div class="chat-bar">
+          <button class="chat-icon-btn" id="btn-add-files" title="Joindre des fichiers" aria-label="Joindre des fichiers">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <button class="chat-icon-btn chat-folder-btn" id="btn-add-folder" title="Joindre un dossier" aria-label="Joindre un dossier">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </button>
+          <textarea id="chat-input" class="chat-input" rows="1" maxlength="8000" placeholder="Message, lien…" aria-label="Votre message" spellcheck="true"></textarea>
+          <button class="chat-send" id="chat-send" title="Envoyer (Entrée)" aria-label="Envoyer" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
         </div>
       </main>
     </div>
@@ -257,27 +261,6 @@
         </button>
       </div>
       <div class="viewer-body" id="viewer-body"></div>
-    </div>
-  </div>
-
-  <!-- TEXT / LINK COMPOSER -->
-  <div class="viewer composer" id="composer" hidden>
-    <div class="viewer-backdrop" id="composer-backdrop"></div>
-    <div class="viewer-panel composer-panel" role="dialog" aria-modal="true" aria-labelledby="composer-title">
-      <div class="viewer-header">
-        <div class="viewer-title" id="composer-title">Partager un texte ou un lien</div>
-        <button class="viewer-btn viewer-close" id="composer-close" title="Fermer (Échap)" aria-label="Fermer">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
-      <div class="composer-body">
-        <textarea id="composer-text" class="composer-text" maxlength="8000" placeholder="Collez ou écrivez un texte, un lien, un code…" aria-label="Texte à partager" spellcheck="false"></textarea>
-        <div class="composer-footer">
-          <span class="composer-count" id="composer-count">0 / 8000</span>
-          <button class="viewer-btn" id="composer-paste" hidden>Coller</button>
-          <button class="btn-create composer-send" id="composer-send" disabled>Partager</button>
-        </div>
-      </div>
     </div>
   </div>
 

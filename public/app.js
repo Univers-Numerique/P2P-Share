@@ -228,6 +228,10 @@ function showScreen(id) {
   requestAnimationFrame(() => { requestAnimationFrame(() => { if (currentScreen === id) el.classList.add('active'); }); });
 }
 
+function avatarClass(memberId) {
+  return AVATAR_CLASSES[(Number.parseInt(String(memberId).slice(0, 6), 16) || 0) % AVATAR_CLASSES.length];
+}
+
 function avatarInitials(pseudo) {
   const parts = pseudo.match(/[A-ZÀ-Ö][a-zà-ö]*/g);
   if (parts && parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
@@ -385,14 +389,18 @@ function initSocket() {
   socket.on('member-joined', ({ memberId, pseudo, isHost: host }) => {
     if (!salonId) return;
     addMember(memberId, pseudo, host, null, false);
-    showToast(`${pseudo} a rejoint le salon.`);
+    addSystemLine(`${pseudo} a rejoint le salon`);
     for (const fileId of myFiles.keys()) announceFile(fileId, memberId);
   });
+
+  socket.on('typing', ({ from }) => showTyping(from));
 
   socket.on('member-away', ({ memberId, graceMs }) => {
     const m = members.get(memberId);
     if (!m) return;
     setMemberAway(memberId, true);
+    clearTyping(memberId);
+    addSystemLine(`${m.pseudo} est en veille`);
     if (m.isHost) {
       showToast(`${m.pseudo} (hôte) est en veille. Le salon fermera dans ${Math.round(graceMs / 60_000)} min s'il ne revient pas.`, 6000);
     }
@@ -403,8 +411,10 @@ function initSocket() {
     if (members.has(memberId)) {
       setMemberPseudo(memberId, pseudo);
       setMemberAway(memberId, false);
+      addSystemLine(`${pseudo} est de retour`);
     } else {
       addMember(memberId, pseudo, host, null, false);
+      addSystemLine(`${pseudo} a rejoint le salon`);
     }
     // Their page may have been reloaded: make sure they know our files
     for (const fileId of myFiles.keys()) announceFile(fileId, memberId);
@@ -421,7 +431,7 @@ function initSocket() {
   socket.on('member-left', ({ memberId, pseudo }) => {
     if (!members.has(memberId)) return;
     removeMember(memberId);
-    showToast(`${pseudo} a quitté le salon.`);
+    addSystemLine(`${pseudo} a quitté le salon`);
   });
 
   socket.on('file-announce', (p) => { onFileAnnounced(p).catch(err => console.warn('file-announce:', err)); });
@@ -434,10 +444,7 @@ function initSocket() {
 
   // A member lists the files it still has (after a reload): drop the others
   socket.on('file-sync', ({ from, fileIds }) => {
-    const keep = new Set(fileIds);
-    for (const [fileId, info] of [...remoteFiles]) {
-      if (info.senderMemberId === from && !keep.has(fileId)) removeRemoteFile(fileId);
-    }
+    releaseSenderItems(from, new Set(fileIds));
   });
 
   socket.on('salon-destroyed', ({ reason }) => {
@@ -635,14 +642,22 @@ function enterSalon(sid, host, memberInfos) {
   linkDisplay.textContent = url;
   sidebarSalonId.textContent = sid;
 
+  addSystemLine('🔒 Messages et fichiers chiffrés de bout en bout : le serveur ne peut pas les lire.', 0);   // pinned on top
+  addSystemLine(host ? 'Salon ouvert. Partagez le lien pour inviter.' : 'Vous avez rejoint le salon');
   updateFilesUI();
   showScreen('screen-salon');
+  if (matchMedia('(pointer: fine)').matches) chatInput.focus();
   initPeer().catch(err => console.warn('PeerJS init failed, relay only:', err));
 }
 
 function resetSalon() {
   closeViewer();
-  closeComposer();
+  clearAllTyping();
+  for (const url of thumbUrls.values()) URL.revokeObjectURL(url);
+  thumbUrls.clear();
+  pillCount = 0; newMsgPill.hidden = true;
+  unreadCount = 0; document.title = BASE_TITLE;
+  chatInput.value = ''; resizeChatInput();
   setMobilePanel(null);
   localCopies.clear();
   for (const url of tabUrls) URL.revokeObjectURL(url);
@@ -727,16 +742,16 @@ function removeMember(memberId) {
   removeMemberUI(memberId);
   for (const d of [...downloads.values()]) if (d.from === memberId) failDownload(d, 'L\'expéditeur a quitté le salon.');
   for (const up of uploads.values()) if (up.to === memberId) up.cancelled = true;
-  for (const [fid, info] of [...remoteFiles]) if (info.senderMemberId === memberId) removeRemoteFile(fid);
+  clearTyping(memberId);
+  releaseSenderItems(memberId);   // the thread keeps what they sent
 }
 
 function addMemberUI(memberId, pseudo, isHostMember, isMe) {
   const li = document.createElement('li');
   li.className = 'member-item';
   li.id = 'member-' + memberId;
-  const idx = membersList.children.length % AVATAR_CLASSES.length;
   li.innerHTML = `
-    <div class="member-avatar ${AVATAR_CLASSES[idx]}">${escapeHtml(avatarInitials(pseudo))}</div>
+    <div class="member-avatar ${avatarClass(memberId)}">${escapeHtml(avatarInitials(pseudo))}</div>
     <span class="member-name">${escapeHtml(pseudo)}</span>
     ${isMe ? '<span class="member-you">(vous)</span>' : '<span class="member-away">en veille</span>'}
     ${isHostMember ? '<span class="member-host-badge">hôte</span>' : ''}
@@ -1161,13 +1176,13 @@ function armTimeout(d) {
   d.timer = setTimeout(() => failDownload(d, 'Délai dépassé.'), TRANSFER_IDLE_MS);
 }
 
-// ── FILES ─────────────────────────────────────────────────────────
+// ── ITEMS (files and messages) ────────────────────────────────────
 async function announceFile(fileId, to) {
   const fd = myFiles.get(fileId);
   if (!fd || !cryptoKey) return;
   const payload = fd.kind === 'text'
     ? { kind: 'text', text: fd.text, at: fd.at }
-    : { name: fd.name, size: fd.size, type: fd.mimeType };
+    : { name: fd.name, size: fd.size, type: fd.mimeType, at: fd.at };
   const plain = textEnc.encode(JSON.stringify(payload));
   const meta = await encryptBytes(plain, textEnc.encode('meta:' + fileId));
   socket.emit('file-announce', to ? { fileId, meta: meta.buffer, to } : { fileId, meta: meta.buffer });
@@ -1183,16 +1198,14 @@ async function onFileAnnounced({ from, fileId, meta }) {
   const obj = JSON.parse(textDec.decode(plain));
   if (!members.has(from)) return;
 
+  // The sender's clock orders the thread; never trust a date from the future
+  const at = Number.isSafeInteger(obj.at) ? Math.min(obj.at, Date.now() + 60_000) : Date.now();
   let info;
   if (obj.kind === 'text') {
-    // Shared text / link: the content travels with the announcement itself
+    // Message / link: the content travels with the announcement itself
     const text = typeof obj.text === 'string' ? cleanText(obj.text) : '';
     if (!text || text.length > TEXT_SHARE_MAX) return;
-    info = {
-      fileId, kind: 'text', text, name: '', size: 0,
-      at: Number.isSafeInteger(obj.at) ? obj.at : Date.now(),
-      senderMemberId: from, senderPseudo: sender.pseudo
-    };
+    info = { fileId, kind: 'text', text, name: '', size: 0, at, senderMemberId: from, senderPseudo: sender.pseudo };
   } else {
     if (!Number.isSafeInteger(obj.size) || obj.size < 0 || typeof obj.name !== 'string') return;
     info = {
@@ -1200,14 +1213,18 @@ async function onFileAnnounced({ from, fileId, meta }) {
       name: cleanPath(obj.name),
       size: obj.size,
       mimeType: typeof obj.type === 'string' ? obj.type.slice(0, 128) : '',
+      at,
       senderMemberId: from,
       senderPseudo: sender.pseudo
     };
   }
   remoteFiles.set(fileId, info);
-  if (!existing) {
-    if (info.kind === 'text') renderTextCard(fileId);
-    else renderRemoteFileCard(info);
+  if (existing) {
+    // Re-announced (sender came back): available again
+    if (existing.gone) setItemGone(fileId, false);
+  } else {
+    clearTyping(from);
+    renderItem(fileId);
   }
   updateFilesUI();
 }
@@ -1217,9 +1234,40 @@ function addFiles(entries) {
   if (!salonId) return;
   for (const { file, path } of entries) {
     const fileId = randomHex(8);
-    myFiles.set(fileId, { file, name: cleanPath(path || file.name), size: file.size, mimeType: file.type });
-    renderMyFileCard(fileId);
+    myFiles.set(fileId, { file, name: cleanPath(path || file.name), size: file.size, mimeType: file.type, at: Date.now() });
+    renderItem(fileId);
     announceFile(fileId).catch(err => console.warn('announce:', err));
+  }
+  updateFilesUI();
+}
+
+function sendMessage(input) {
+  const text = cleanText(input).slice(0, TEXT_SHARE_MAX);
+  if (!salonId || !text) return;
+  const fileId = randomHex(8);
+  myFiles.set(fileId, { kind: 'text', text, at: Date.now(), name: '', size: 0 });
+  renderItem(fileId);
+  announceFile(fileId).catch(err => console.warn('announce:', err));
+  persistTexts();
+  updateFilesUI();
+}
+
+// Our own messages survive a page reload (files can't: the browser loses access to them)
+function persistTexts() {
+  const items = [...myFiles].filter(([, f]) => f.kind === 'text').map(([fileId, f]) => ({ fileId, text: f.text, at: f.at }));
+  storageSet(sessionStorage, TEXTS_KEY, items.length ? JSON.stringify({ salonId, items }) : null);
+}
+
+function restoreTexts() {
+  let saved = null;
+  try { saved = JSON.parse(storageGet(sessionStorage, TEXTS_KEY)); } catch { /* corrupted */ }
+  if (!saved || saved.salonId !== salonId || !Array.isArray(saved.items)) return;
+  for (const item of saved.items) {
+    const text = typeof item.text === 'string' ? cleanText(item.text).slice(0, TEXT_SHARE_MAX) : '';
+    if (!ID_RE.test(item.fileId) || !text || myFiles.has(item.fileId)) continue;
+    myFiles.set(item.fileId, { kind: 'text', text, at: Number.isSafeInteger(item.at) ? item.at : Date.now(), name: '', size: 0 });
+    renderItem(item.fileId, { quiet: true });
+    announceFile(item.fileId).catch(err => console.warn('announce:', err));
   }
   updateFilesUI();
 }
@@ -1229,19 +1277,57 @@ function removeMyFile(fileId) {
   myFiles.delete(fileId);
   persistTexts();
   for (const up of uploads.values()) if (up.fileId === fileId) up.cancelled = true;
-  removeFileCard(fileId);
+  removeItemElement(fileId);
   socket.emit('file-remove', { fileId });
   updateFilesUI();
 }
 
+// The sender deleted it: gone for everyone
 function removeRemoteFile(fileId) {
   const d = activeDownloadFor(fileId);
   if (d) failDownload(d, 'Fichier retiré par l\'expéditeur.');
   if (viewerFileId === fileId) closeViewer();
   localCopies.delete(fileId);
   remoteFiles.delete(fileId);
-  removeFileCard(fileId);
+  removeItemElement(fileId);
   updateFilesUI();
+}
+
+// The sender left (or reloaded and lost the file): the thread keeps its history.
+// Messages stay readable; a file can no longer be fetched unless we already have a copy.
+function releaseSenderItems(memberId, keepIds = null) {
+  for (const [fileId, info] of remoteFiles) {
+    if (info.senderMemberId !== memberId || info.kind === 'text') continue;
+    if (keepIds && keepIds.has(fileId)) continue;
+    setItemGone(fileId, true);
+  }
+  updateFilesUI();
+}
+
+function setItemGone(fileId, gone) {
+  const info = remoteFiles.get(fileId);
+  if (!info || info.kind === 'text') return;
+  info.gone = gone;
+  if (gone) {
+    const d = activeDownloadFor(fileId);
+    if (d) failDownload(d, 'L\'expéditeur n\'est plus là.');
+  }
+  document.getElementById('fc-' + fileId)?.classList.toggle('gone', gone);
+  const btn = document.getElementById('dl-' + fileId);
+  const status = document.getElementById('status-' + fileId);
+  if (btn) {
+    btn.disabled = gone;
+    btn.innerHTML = gone ? 'Indisponible' : `${ICON_DOWNLOAD} Télécharger`;
+  }
+  if (status) {
+    status.classList.remove('status-error');
+    status.textContent = gone ? 'Plus disponible' : 'Prêt';
+  }
+  updatePreviewButton(fileId);
+}
+
+function itemAvailable(info) {
+  return info.kind !== 'text' && (!info.gone || localCopies.has(info.fileId));
 }
 
 // Recursively collects dropped files, keeping folder structure
@@ -1267,42 +1353,290 @@ async function collectDropped(dataTransfer) {
   return out;
 }
 
-// ── FILE CARDS ────────────────────────────────────────────────────
+// ── TEXT HELPERS ──────────────────────────────────────────────────
+// Keeps line breaks and tabs, drops other control characters
+function cleanText(str) {
+  return String(str).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
+}
+
+function safeHttpUrl(str) {
+  try {
+    const url = new URL(str);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// The whole message is one link: it gets an "open" button
+function singleUrl(text) {
+  return /^https?:\/\/\S+$/.test(text) ? safeHttpUrl(text) : null;
+}
+
+// Fills `container` with the text, turning http(s) URLs into links. Everything goes through
+// text nodes and validated hrefs, so a message can never inject markup.
+function linkify(container, text) {
+  container.replaceChildren();
+  const re = /https?:\/\/[^\s<>"']+/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const raw = m[0].replace(/[.,;:!?)\]]+$/, '');   // trailing punctuation belongs to the sentence
+    const href = safeHttpUrl(raw);
+    if (!href) continue;
+    container.append(text.slice(last, m.index));
+    const a = document.createElement('a');
+    a.href = href;
+    a.textContent = raw;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    container.append(a);
+    last = m.index + raw.length;
+  }
+  container.append(text.slice(last));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard API unavailable or refused: fall back to a hidden textarea
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (!ok) { showToast('Copie impossible sur ce navigateur.'); return; }
+  }
+  showToast('Copié.');
+}
+
+// ── THREAD ────────────────────────────────────────────────────────
 const ICON_REMOVE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 const ICON_EYE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const ICON_DOWNLOAD = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+const ICON_COPY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const ICON_EXTERNAL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
 
-function fileCardHtml(fileId, name, size, senderLabel, status, actionHtml) {
-  return `
-    <div class="file-thumb">${fileEmoji(name)}</div>
-    <div class="file-info">
-      <div class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
-      <div class="file-meta">
-        <span>${formatSize(size)}</span>
-        <span class="file-sender">${escapeHtml(senderLabel)}</span>
-        <span id="status-${fileId}">${status}</span>
-      </div>
-      <div class="file-progress" id="prog-wrap-${fileId}" style="display:none">
-        <div class="progress-track"><div class="progress-bar-fill" id="prog-${fileId}" style="width:0%"></div></div>
-        <div class="progress-label" id="prog-label-${fileId}"></div>
+const chatInput   = document.getElementById('chat-input');
+const chatSend    = document.getElementById('chat-send');
+const newMsgPill  = document.getElementById('new-msg-pill');
+const newMsgCount = document.getElementById('new-msg-count');
+const typingLine  = document.getElementById('typing-line');
+const BASE_TITLE  = document.title;
+const THUMB_MAX_BYTES = 25 * 1024 * 1024;
+
+let pillCount = 0;       // items received while scrolled up
+let unreadCount = 0;     // items received while the tab was hidden
+const thumbUrls = new Map();   // fileId -> object URL of the inline image preview
+
+function formatTime(at) {
+  return new Date(at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function isNearBottom() {
+  return filesList.scrollHeight - filesList.scrollTop - filesList.clientHeight < 80;
+}
+
+function scrollToBottom() {
+  filesList.scrollTop = filesList.scrollHeight;
+  pillCount = 0;
+  newMsgPill.hidden = true;
+}
+
+// Keeps the thread sorted by date: late history (a member re-announcing) lands at its place
+function insertByDate(el, at) {
+  el.dataset.at = at;
+  let ref = filesList.lastElementChild;
+  while (ref && Number(ref.dataset.at) > at) ref = ref.previousElementSibling;
+  if (ref) ref.after(el);
+  else filesList.prepend(el);
+}
+
+// Adds an element to the thread and handles scrolling / unread counters
+function addToThread(el, at, { own = false, quiet = false } = {}) {
+  const stick = own || isNearBottom();
+  insertByDate(el, at);
+  regroupThread();
+  if (stick) {
+    scrollToBottom();
+  } else if (!quiet) {
+    pillCount++;
+    newMsgCount.textContent = pillCount === 1 ? '1 nouveau' : `${pillCount} nouveaux`;
+    newMsgPill.hidden = false;
+  }
+  if (!own && !quiet && document.visibilityState !== 'visible') {
+    unreadCount++;
+    document.title = `(${unreadCount}) ${BASE_TITLE}`;
+  }
+}
+
+function addSystemLine(text, at = Date.now()) {
+  const line = document.createElement('div');
+  line.className = 'sys-line';
+  line.textContent = text;
+  addToThread(line, at, { quiet: true });
+}
+
+// Consecutive messages from the same person within a few minutes share one name / avatar
+function regroupThread() {
+  let prev = null;
+  for (const el of filesList.children) {
+    const isMsg = el.classList.contains('msg');
+    const grouped = isMsg && prev?.classList.contains('msg')
+      && prev.dataset.sender === el.dataset.sender
+      && Number(el.dataset.at) - Number(prev.dataset.at) < 5 * 60_000;
+    if (isMsg) el.classList.toggle('grouped', grouped);
+    prev = el;
+  }
+}
+
+function renderItem(fileId, { quiet = false } = {}) {
+  if (document.getElementById('fc-' + fileId)) return;
+  const own = myFiles.has(fileId);
+  const info = myFiles.get(fileId) || remoteFiles.get(fileId);
+  if (!info) return;
+
+  const row = document.createElement('div');
+  row.className = `msg ${own ? 'own' : 'other'}`;
+  row.id = 'fc-' + fileId;
+  row.dataset.sender = own ? 'me' : info.senderMemberId;
+  row.innerHTML = `
+    ${own ? '' : `<div class="msg-avatar ${avatarClass(info.senderMemberId)}">${escapeHtml(avatarInitials(info.senderPseudo))}</div>`}
+    <div class="msg-col">
+      ${own ? '' : `<div class="msg-sender">${escapeHtml(info.senderPseudo)}</div>`}
+      <div class="bubble"></div>
+      <div class="msg-foot"><span class="msg-time">${formatTime(info.at)}</span></div>
+    </div>
+  `;
+  const bubble = row.querySelector('.bubble');
+  const foot = row.querySelector('.msg-foot');
+  if (info.kind === 'text') fillTextBubble(bubble, foot, info);
+  else fillFileBubble(bubble, fileId, info, own);
+
+  if (own) {
+    const del = document.createElement('button');
+    del.className = 'msg-action';
+    del.title = 'Supprimer pour tout le monde';
+    del.setAttribute('aria-label', 'Supprimer');
+    del.innerHTML = ICON_REMOVE;
+    del.addEventListener('click', () => removeMyFile(fileId));
+    foot.appendChild(del);
+  }
+
+  addToThread(row, info.at, { own, quiet });
+  if (info.kind !== 'text') {
+    updatePreviewButton(fileId);
+    updateThumb(fileId);
+  }
+}
+
+function fillTextBubble(bubble, foot, info) {
+  bubble.classList.add('bubble-text');
+  const body = document.createElement('div');
+  body.className = 'text-body';
+  linkify(body, info.text);
+  bubble.appendChild(body);
+
+  if (info.text.length > 600 || info.text.split('\n').length > 10) {
+    body.classList.add('clamped');
+    const more = document.createElement('button');
+    more.className = 'btn-more';
+    more.textContent = 'Afficher plus';
+    more.addEventListener('click', () => {
+      const clamped = body.classList.toggle('clamped');
+      more.textContent = clamped ? 'Afficher plus' : 'Afficher moins';
+    });
+    bubble.appendChild(more);
+  }
+
+  const url = singleUrl(info.text);
+  if (url) {
+    const open = document.createElement('a');
+    open.className = 'msg-action';
+    open.href = url;
+    open.target = '_blank';
+    open.rel = 'noopener noreferrer';
+    open.title = 'Ouvrir le lien';
+    open.setAttribute('aria-label', 'Ouvrir le lien');
+    open.innerHTML = ICON_EXTERNAL;
+    foot.appendChild(open);
+  }
+  const copy = document.createElement('button');
+  copy.className = 'msg-action btn-copy-text';
+  copy.title = 'Copier';
+  copy.setAttribute('aria-label', 'Copier');
+  copy.innerHTML = ICON_COPY;
+  copy.addEventListener('click', () => copyText(info.text));
+  foot.appendChild(copy);
+}
+
+function fillFileBubble(bubble, fileId, info, own) {
+  bubble.classList.add('bubble-file');
+  bubble.innerHTML = `
+    <button class="file-preview" id="thumb-${fileId}" title="Ouvrir" aria-label="Ouvrir l'image" hidden></button>
+    <div class="file-row">
+      <div class="file-thumb">${fileEmoji(info.name)}</div>
+      <div class="file-info">
+        <div class="file-name" title="${escapeHtml(info.name)}">${escapeHtml(info.name)}</div>
+        <div class="file-meta">
+          <span>${formatSize(info.size)}</span>
+          <span id="status-${fileId}">${own ? 'Disponible' : 'Prêt'}</span>
+        </div>
+        <div class="file-progress" id="prog-wrap-${fileId}" style="display:none">
+          <div class="progress-track"><div class="progress-bar-fill" id="prog-${fileId}" style="width:0%"></div></div>
+          <div class="progress-label" id="prog-label-${fileId}"></div>
+        </div>
       </div>
     </div>
     <div class="file-actions">
-      <span class="file-type-badge ${badgeClass(name)}">${badgeLabel(name)}</span>
-      ${actionHtml}
+      <button class="btn-preview" id="pv-${fileId}" hidden>${ICON_EYE} <span>Aperçu</span></button>
+      ${own ? '' : `<button class="btn-download" id="dl-${fileId}">${ICON_DOWNLOAD} Télécharger</button>`}
     </div>
   `;
+  bubble.querySelector('.btn-preview').addEventListener('click', () => openFile(fileId));
+  bubble.querySelector('.file-preview').addEventListener('click', () => openFile(fileId));
+  bubble.querySelector('.btn-download')?.addEventListener('click', () => downloadRemote(fileId));
 }
 
-function previewButtonHtml(fileId) {
-  return `<button class="btn-preview" id="pv-${fileId}" hidden>${ICON_EYE} <span>Aperçu</span></button>`;
+function removeItemElement(fileId) {
+  document.getElementById('fc-' + fileId)?.remove();
+  regroupThread();
+  const url = thumbUrls.get(fileId);
+  if (url) { URL.revokeObjectURL(url); thumbUrls.delete(fileId); }
+}
+
+// Inline image preview, only from a copy that is already on this device (ours, or downloaded)
+async function updateThumb(fileId) {
+  const info = myFiles.get(fileId) || remoteFiles.get(fileId);
+  const holder = document.getElementById('thumb-' + fileId);
+  if (!info || !holder || thumbUrls.has(fileId)) return;
+  const preview = previewKind(info.name);
+  if (preview?.kind !== 'image' || info.size > THUMB_MAX_BYTES) return;
+  const source = await getLocalCopy(fileId);
+  if (!source || thumbUrls.has(fileId) || !holder.isConnected) return;
+
+  const stick = isNearBottom();
+  const url = URL.createObjectURL(new Blob([source], { type: preview.type }));
+  thumbUrls.set(fileId, url);
+  const img = document.createElement('img');
+  img.alt = baseName(info.name);
+  img.addEventListener('load', () => { if (stick) scrollToBottom(); });
+  img.addEventListener('error', () => { holder.hidden = true; });
+  img.src = url;
+  holder.replaceChildren(img);
+  holder.hidden = false;
+  holder.closest('.bubble').classList.add('has-preview');
 }
 
 function canOpen(fileId) {
   const info = myFiles.get(fileId) || remoteFiles.get(fileId);
   if (!info) return false;
+  const local = myFiles.has(fileId) || localCopies.has(fileId);
+  if (info.gone && !local) return false;
   if (previewKind(info.name)) return true;
-  return !myFiles.has(fileId) && localCopies.has(fileId) && canOpenWith(info.name);
+  return !myFiles.has(fileId) && local && canOpenWith(info.name);
 }
 
 // "Aperçu" fetches the file first; "Ouvrir" uses a copy that is already on this device.
@@ -1316,34 +1650,7 @@ function updatePreviewButton(fileId) {
   btn.hidden = !canOpen(fileId);
   btn.title = previewKind(info.name) ? label : 'Ouvrir avec une autre application';
   btn.querySelector('span').textContent = label;
-}
-
-function renderMyFileCard(fileId) {
-  const fd = myFiles.get(fileId);
-  const card = document.createElement('div');
-  card.className = 'file-card';
-  card.id = 'fc-' + fileId;
-  card.innerHTML = fileCardHtml(fileId, fd.name, fd.size, 'Vous', 'Disponible',
-    `${previewButtonHtml(fileId)}
-     <button class="btn-remove" title="Retirer ce fichier" aria-label="Retirer">${ICON_REMOVE}</button>`);
-  card.querySelector('.btn-remove').addEventListener('click', () => removeMyFile(fileId));
-  card.querySelector('.btn-preview')?.addEventListener('click', () => openFile(fileId));
-  filesList.appendChild(card);
-  updatePreviewButton(fileId);
-}
-
-function renderRemoteFileCard(info) {
-  if (document.getElementById('fc-' + info.fileId)) return;
-  const card = document.createElement('div');
-  card.className = 'file-card';
-  card.id = 'fc-' + info.fileId;
-  card.innerHTML = fileCardHtml(info.fileId, info.name, info.size, info.senderPseudo, 'Prêt',
-    `${previewButtonHtml(info.fileId)}
-     <button class="btn-download" id="dl-${info.fileId}">${ICON_DOWNLOAD} Télécharger</button>`);
-  card.querySelector('.btn-download').addEventListener('click', () => downloadRemote(info.fileId));
-  card.querySelector('.btn-preview')?.addEventListener('click', () => openFile(info.fileId));
-  filesList.appendChild(card);
-  updatePreviewButton(info.fileId);
+  if (local) updateThumb(fileId);
 }
 
 function downloadRemote(fileId) {
@@ -1358,21 +1665,20 @@ function downloadRemote(fileId) {
   startDownload(fileId).catch(err => showToast(err.message));
 }
 
-function removeFileCard(fileId) {
-  document.getElementById('fc-' + fileId)?.remove();
-}
-
 function setDownloadUI(fileId, state, statusText) {
   const btn = document.getElementById('dl-' + fileId);
   const status = document.getElementById('status-' + fileId);
   const wrap = document.getElementById('prog-wrap-' + fileId);
+  const gone = !!remoteFiles.get(fileId)?.gone;
   if (status) {
     status.textContent = statusText;
     status.classList.toggle('status-error', state === 'error');
   }
   if (btn) {
-    btn.disabled = state === 'active';
-    btn.innerHTML = state === 'active' ? 'En cours…' : `${ICON_DOWNLOAD} ${state === 'error' ? 'Réessayer' : 'Télécharger'}`;
+    btn.disabled = state === 'active' || gone;
+    btn.innerHTML = state === 'active' ? 'En cours…'
+      : gone ? 'Indisponible'
+      : `${ICON_DOWNLOAD} ${state === 'error' ? 'Réessayer' : 'Télécharger'}`;
   }
   if (wrap) {
     if (state === 'active') {
@@ -1414,219 +1720,115 @@ function renderUploadStatus(fileId) {
 }
 
 function updateFilesUI() {
-  const total = myFiles.size + remoteFiles.size;
-  const hasFiles = [...myFiles.values(), ...remoteFiles.values()].some(f => f.kind !== 'text');
-  dropZone.classList.toggle('visible', total === 0);
-  emptyState.classList.toggle('hidden', total > 0);
-  filesList.classList.toggle('hidden', total === 0);
-  btnZip.disabled = !hasFiles || zipping;   // shared texts are not part of the archive
-  filesCount.textContent = total <= 1 ? `${total} élément` : `${total} éléments`;
+  const all = [...myFiles.values(), ...remoteFiles.values()];
+  const messages = all.filter(f => f.kind === 'text').length;
+  const files = all.length - messages;
+  const hasFiles = myFiles.size && [...myFiles.values()].some(f => f.kind !== 'text')
+    || [...remoteFiles.values()].some(itemAvailable);
+  emptyState.classList.toggle('hidden', all.length > 0);
+  btnZip.disabled = !hasFiles || zipping;   // messages are not part of the archive
+  const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
+  filesCount.textContent = `${plural(messages, 'message')} · ${plural(files, 'fichier')}`;
 }
 
-// ── SHARED TEXT / LINKS ───────────────────────────────────────────
-const ICON_COPY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-const ICON_EXTERNAL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
-
-// Keeps line breaks and tabs, drops other control characters
-function cleanText(str) {
-  return String(str).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
-}
-
-function safeHttpUrl(str) {
-  try {
-    const url = new URL(str);
-    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
-// The whole text is one link: the card gets an "Ouvrir" button
-function singleUrl(text) {
-  return /^https?:\/\/\S+$/.test(text) ? safeHttpUrl(text) : null;
-}
-
-// Fills `container` with the text, turning http(s) URLs into links. Everything goes through
-// text nodes and validated hrefs, so a shared text can never inject markup.
-function linkify(container, text) {
-  container.replaceChildren();
-  const re = /https?:\/\/[^\s<>"']+/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    const raw = m[0].replace(/[.,;:!?)\]]+$/, '');   // trailing punctuation belongs to the sentence
-    const href = safeHttpUrl(raw);
-    if (!href) continue;
-    container.append(text.slice(last, m.index));
-    const a = document.createElement('a');
-    a.href = href;
-    a.textContent = raw;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    container.append(a);
-    last = m.index + raw.length;
-  }
-  container.append(text.slice(last));
-}
-
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Clipboard API unavailable or refused: fall back to a hidden textarea
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    if (!ok) { showToast('Copie impossible sur ce navigateur.'); return; }
-  }
-  showToast('Copié.');
-}
-
-function shareText(input) {
-  const text = cleanText(input).slice(0, TEXT_SHARE_MAX);
-  if (!salonId || !text) return;
-  const fileId = randomHex(8);
-  myFiles.set(fileId, { kind: 'text', text, at: Date.now(), name: '', size: 0 });
-  renderTextCard(fileId);
-  announceFile(fileId).catch(err => console.warn('announce:', err));
-  persistTexts();
-  updateFilesUI();
-}
-
-// Our own texts survive a page reload (files can't: the browser loses access to them)
-function persistTexts() {
-  const items = [...myFiles].filter(([, f]) => f.kind === 'text').map(([fileId, f]) => ({ fileId, text: f.text, at: f.at }));
-  storageSet(sessionStorage, TEXTS_KEY, items.length ? JSON.stringify({ salonId, items }) : null);
-}
-
-function restoreTexts() {
-  let saved = null;
-  try { saved = JSON.parse(storageGet(sessionStorage, TEXTS_KEY)); } catch { /* corrupted */ }
-  if (!saved || saved.salonId !== salonId || !Array.isArray(saved.items)) return;
-  for (const item of saved.items) {
-    const text = typeof item.text === 'string' ? cleanText(item.text).slice(0, TEXT_SHARE_MAX) : '';
-    if (!ID_RE.test(item.fileId) || !text || myFiles.has(item.fileId)) continue;
-    myFiles.set(item.fileId, { kind: 'text', text, at: Number.isSafeInteger(item.at) ? item.at : Date.now(), name: '', size: 0 });
-    renderTextCard(item.fileId);
-    announceFile(item.fileId).catch(err => console.warn('announce:', err));
-  }
-  updateFilesUI();
-}
-
-function renderTextCard(fileId) {
-  const own = myFiles.has(fileId);
-  const info = myFiles.get(fileId) || remoteFiles.get(fileId);
-  if (!info || document.getElementById('fc-' + fileId)) return;
-  const url = singleUrl(info.text);
-  const time = new Date(info.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-
-  const card = document.createElement('div');
-  card.className = 'file-card text-card';
-  card.id = 'fc-' + fileId;
-  card.innerHTML = `
-    <div class="file-thumb">${url ? '🔗' : '💬'}</div>
-    <div class="file-info">
-      <div class="text-body clamped"></div>
-      <button class="btn-more" hidden>Afficher plus</button>
-      <div class="file-meta">
-        <span class="file-sender">${escapeHtml(own ? 'Vous' : info.senderPseudo)}</span>
-        <span>${time}</span>
-      </div>
-    </div>
-    <div class="file-actions">
-      <span class="file-type-badge ${url ? 'badge-link' : 'badge-text'}">${url ? 'Lien' : 'Texte'}</span>
-      ${url ? `<a class="btn-preview" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Ouvrir le lien">${ICON_EXTERNAL} <span>Ouvrir</span></a>` : ''}
-      <button class="btn-copy-text" title="Copier dans le presse-papiers">${ICON_COPY} Copier</button>
-      ${own ? `<button class="btn-remove" title="Retirer" aria-label="Retirer">${ICON_REMOVE}</button>` : ''}
-    </div>
-  `;
-
-  const body = card.querySelector('.text-body');
-  linkify(body, info.text);
-  const more = card.querySelector('.btn-more');
-  if (info.text.length > 280 || info.text.split('\n').length > 4) {
-    more.hidden = false;
-    more.addEventListener('click', () => {
-      const clamped = body.classList.toggle('clamped');
-      more.textContent = clamped ? 'Afficher plus' : 'Afficher moins';
-    });
-  } else {
-    body.classList.remove('clamped');
-  }
-  card.querySelector('.btn-copy-text').addEventListener('click', () => copyText(info.text));
-  card.querySelector('.btn-remove')?.addEventListener('click', () => removeMyFile(fileId));
-  filesList.appendChild(card);
-}
-
-// Composer dialog
-const composer      = document.getElementById('composer');
-const composerText  = document.getElementById('composer-text');
-const composerCount = document.getElementById('composer-count');
-const composerSend  = document.getElementById('composer-send');
-const composerPaste = document.getElementById('composer-paste');
-
-function updateComposer() {
-  composerCount.textContent = `${composerText.value.length} / ${TEXT_SHARE_MAX}`;
-  composerSend.disabled = !composerText.value.trim();
-}
-
-function openComposer(prefill = '') {
-  if (!salonId) return;
-  composerText.value = String(prefill).slice(0, TEXT_SHARE_MAX);
-  composerPaste.hidden = !navigator.clipboard?.readText;
-  updateComposer();
-  composer.hidden = false;
-  composerText.focus();
-}
-
-function closeComposer() {
-  composer.hidden = true;
-  composerText.value = '';
-}
-
-function submitComposer() {
-  if (!composerText.value.trim()) return;
-  shareText(composerText.value);
-  closeComposer();
-}
-
-document.getElementById('btn-add-text').addEventListener('click', () => openComposer());
-document.getElementById('composer-close').addEventListener('click', closeComposer);
-document.getElementById('composer-backdrop').addEventListener('click', closeComposer);
-composerSend.addEventListener('click', submitComposer);
-composerText.addEventListener('input', updateComposer);
-composerText.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComposer(); }
+// Scroll position: hide the "new messages" pill once the bottom is reached
+filesList.addEventListener('scroll', () => {
+  if (!newMsgPill.hidden && isNearBottom()) scrollToBottom();
 });
-composerPaste.addEventListener('click', async () => {
-  try {
-    const text = await navigator.clipboard.readText();
-    composerText.value = (composerText.value + text).slice(0, TEXT_SHARE_MAX);
-    updateComposer();
-    composerText.focus();
-  } catch {
-    showToast('Accès au presse-papiers refusé : collez avec un appui long ou Ctrl+V.', 4000);
+newMsgPill.addEventListener('click', scrollToBottom);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && unreadCount) {
+    unreadCount = 0;
+    document.title = BASE_TITLE;
   }
 });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !composer.hidden) closeComposer();
-});
 
-// Ctrl+V anywhere in the salon: pasted files (screenshots…) are shared, pasted text opens the composer
+// ── TYPING INDICATOR ──────────────────────────────────────────────
+const typingTimers = new Map();   // memberId -> timeout
+let lastTypingSent = 0;
+
+function renderTyping() {
+  const names = [...typingTimers.keys()].map(id => members.get(id)?.pseudo).filter(Boolean);
+  typingLine.textContent = names.length === 0 ? ''
+    : names.length === 1 ? `${names[0]} écrit…`
+    : names.length === 2 ? `${names[0]} et ${names[1]} écrivent…`
+    : 'Plusieurs personnes écrivent…';
+}
+
+function showTyping(memberId) {
+  if (!members.has(memberId)) return;
+  clearTimeout(typingTimers.get(memberId));
+  typingTimers.set(memberId, setTimeout(() => clearTyping(memberId), 4000));
+  renderTyping();
+}
+
+function clearTyping(memberId) {
+  if (!typingTimers.has(memberId)) return;
+  clearTimeout(typingTimers.get(memberId));
+  typingTimers.delete(memberId);
+  renderTyping();
+}
+
+function clearAllTyping() {
+  for (const t of typingTimers.values()) clearTimeout(t);
+  typingTimers.clear();
+  renderTyping();
+}
+
+// ── COMPOSER ──────────────────────────────────────────────────────
+function resizeChatInput() {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 140) + 'px';
+  chatSend.disabled = !chatInput.value.trim();
+}
+
+function submitChat() {
+  if (!chatInput.value.trim()) return;
+  sendMessage(chatInput.value);
+  chatInput.value = '';
+  resizeChatInput();
+  lastTypingSent = 0;
+}
+
+// Puts text in the composer (pasted or dropped outside of it) without sending
+function fillChatInput(text) {
+  const room = TEXT_SHARE_MAX - chatInput.value.length;
+  chatInput.value += String(text).slice(0, Math.max(0, room));
+  resizeChatInput();
+  chatInput.focus();
+}
+
+chatInput.addEventListener('input', () => {
+  resizeChatInput();
+  if (chatInput.value.trim() && Date.now() - lastTypingSent > 2500) {
+    lastTypingSent = Date.now();
+    socket.emit('typing');
+  }
+});
+chatInput.addEventListener('keydown', (e) => {
+  // Physical keyboards: Enter sends, Shift+Enter breaks the line. Touch keyboards: Enter breaks the line.
+  const touchOnly = matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && (!touchOnly || e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    submitChat();
+  }
+});
+chatSend.addEventListener('click', () => { submitChat(); chatInput.focus(); });
+
+// Ctrl+V: files (screenshots…) are shared right away; text lands in the composer
 document.addEventListener('paste', (e) => {
-  if (!inSalonScreen() || !composer.hidden || !viewer.hidden) return;
-  if (e.target.closest?.('input, textarea, [contenteditable="true"]')) return;
+  if (!inSalonScreen() || !viewer.hidden) return;
   const files = [...(e.clipboardData?.files || [])];
-  const text = e.clipboardData?.getData('text/plain') || '';
   if (files.length) {
     e.preventDefault();
     addFiles(files.map(file => ({ file, path: file.name })));
-  } else if (text.trim()) {
+    return;
+  }
+  if (e.target.closest?.('input, textarea, [contenteditable="true"]')) return;   // normal paste
+  const text = e.clipboardData?.getData('text/plain') || '';
+  if (text.trim()) {
     e.preventDefault();
-    openComposer(text);
+    fillChatInput(text);
   }
 });
 
@@ -1952,7 +2154,7 @@ async function downloadAllZip() {
     const used = new Set();
     for (const fd of myFiles.values()) if (fd.kind !== 'text') zip.file(uniquePath(fd.name, used), fd.file);
 
-    const remotes = [...remoteFiles.values()].filter(f => f.kind !== 'text');
+    const remotes = [...remoteFiles.values()].filter(itemAvailable);
     let failed = 0;
     for (let i = 0; i < remotes.length; i++) {
       if (salonId !== zipSalon) return;
@@ -2062,7 +2264,7 @@ document.addEventListener('drop', (e) => {
   collectDropped(e.dataTransfer)
     .then(entries => {
       if (entries.length) addFiles(entries);
-      else if (droppedText.trim()) openComposer(droppedText);   // dragged link or text selection
+      else if (droppedText.trim()) fillChatInput(droppedText);   // dragged link or text selection
     })
     .catch(err => showToast('Lecture impossible : ' + err.message));
 });

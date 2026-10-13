@@ -165,8 +165,12 @@ Si la connexion WebRTC directe échoue (NAT strict, pare-feu), les morceaux chif
 - « Ouvrir » sur un fichier téléchargé : aperçu intégré, ou menu système « Ouvrir avec… » (Web Share API) pour les autres formats (docx, zip…) sur mobile, Windows et macOS
 - Scanner de QR code intégré (caméra) pour rejoindre un salon ; ouvrir un lien d'invitation fait entrer directement dans le salon
 - Interface mobile : barre compacte avec panneaux « Inviter » / « Membres », cartes de fichiers adaptées, zones sûres des écrans à encoche
-- Partage de **textes et de liens** (bouton « Texte », Ctrl+V dans le salon, ou glisser un lien) : chiffrés comme les fichiers, liens cliquables, bouton « Copier ». Jusqu'à 8 000 caractères. Ils restent lisibles quand leur auteur est en veille et survivent à un rechargement de sa page.
-- Coller une capture d'écran ou un fichier (Ctrl+V) le partage directement
+- **Fil de discussion unique**, façon messagerie : messages, liens et fichiers dans l'ordre chronologique, bulles à droite pour soi et à gauche pour les autres, regroupées par personne. Barre de saisie en bas (Entrée envoie, Maj+Entrée va à la ligne), trombone pour joindre des fichiers.
+- Messages chiffrés de bout en bout comme les fichiers (8 000 caractères max), liens cliquables, boutons Copier et Supprimer pour tout le monde. Un message est toujours affiché en texte brut.
+- Indicateur « X écrit… », pastille « N nouveaux » quand on lit plus haut dans le fil, compteur de non-lus dans le titre de l'onglet
+- Les arrivées, départs et mises en veille apparaissent dans le fil. Quand un membre part, ses messages restent lisibles ; ses fichiers restent affichés mais marqués indisponibles (sauf si on les a déjà téléchargés).
+- Aperçu des images directement dans la bulle, pour ses propres images et pour celles déjà téléchargées
+- Coller une capture d'écran ou un fichier (Ctrl+V) le partage directement ; coller du texte le place dans la barre de saisie
 - Dossiers (bouton ou glisser-déposer) avec conservation de l'arborescence
 - « Tout télécharger (.zip) » : récupère tous les fichiers du salon dans une archive
 - Retrait automatique des fichiers d'un membre qui se déconnecte

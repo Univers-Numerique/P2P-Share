@@ -357,6 +357,16 @@ io.on('connection', (socket) => {
     socket.to(salon.id).emit('file-sync', { from: socket.data.memberId, fileIds: ids });
   });
 
+  // "X is typing": no content, just a hint forwarded to the salon (at most once per second)
+  let lastTyping = 0;
+  on('typing', () => {
+    const salon = salonOf(socket);
+    const now = Date.now();
+    if (!salon || now - lastTyping < 1000) return;
+    lastTyping = now;
+    socket.to(salon.id).emit('typing', { from: socket.data.memberId });
+  });
+
   // ── RELAY (fallback when WebRTC cannot connect) ──
   on('relay-ctrl', (p) => {
     const target = memberSocket(socket, p?.to);
