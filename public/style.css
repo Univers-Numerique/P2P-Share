@@ -603,7 +603,7 @@ html, body {
 .badge-fold  { background: rgba(167,139,250,0.1); color: #a78bfa; }
 .badge-other { background: var(--bg-4); color: var(--text-3); }
 
-.btn-download {
+.btn-download, .btn-copy-text {
   display: flex; align-items: center; gap: 6px;
   background: none;
   border: 1px solid var(--border-2);
@@ -613,7 +613,7 @@ html, body {
   font-size: 12px; color: var(--text-2);
   cursor: pointer; transition: all 0.15s;
 }
-.btn-download:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-download:hover:not(:disabled), .btn-copy-text:hover { border-color: var(--accent); color: var(--accent); }
 .btn-download:disabled { opacity: 0.3; cursor: default; }
 
 .btn-preview {
@@ -629,6 +629,7 @@ html, body {
 .btn-preview:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
 .btn-preview:disabled { opacity: 0.3; cursor: default; }
 .btn-preview[hidden] { display: none; }
+a.btn-preview { text-decoration: none; }
 
 .btn-remove {
   background: none; border: none;
@@ -764,6 +765,49 @@ html, body {
   color: var(--text-2); font-size: 14px; text-align: center;
 }
 
+/* ── SHARED TEXT / LINKS ────────────────────────────────────── */
+.text-card { align-items: flex-start; }
+.text-body {
+  font-size: 14px; line-height: 1.55; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  margin-bottom: 6px;
+}
+.text-body.clamped {
+  display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4; line-clamp: 4;
+  overflow: hidden;
+}
+.text-body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.text-body a:hover { color: var(--accent-dim); }
+.btn-more {
+  background: none; border: none; padding: 0; margin-bottom: 6px;
+  font-family: var(--font); font-size: 12px; color: var(--blue);
+  cursor: pointer;
+}
+.btn-more[hidden] { display: none; }
+.badge-text { background: rgba(167,139,250,0.12); color: #a78bfa; }
+.badge-link { background: rgba(96,165,250,0.1); color: var(--blue); }
+
+.composer-panel { width: min(620px, 100%); }
+.composer-body { display: flex; flex-direction: column; gap: 12px; padding: 16px; min-height: 0; flex: 1; }
+.composer-text {
+  width: 100%; min-height: 180px; flex: 1;
+  resize: vertical;
+  background: var(--bg-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--font); font-size: 15px; line-height: 1.5;
+  color: var(--text);
+  outline: none;
+}
+.composer-text:focus { border-color: var(--accent); }
+.composer-text::placeholder { color: var(--text-3); }
+.composer-footer { display: flex; align-items: center; gap: 10px; }
+.composer-count { flex: 1; font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+.composer-send { width: auto; padding: 10px 22px; font-size: 14px; }
+.composer-send:disabled { opacity: 0.4; cursor: default; }
+
 /* ── QR SCANNER ─────────────────────────────────────────────── */
 .scanner-panel { width: min(480px, 100%); }
 .scanner-body {
@@ -846,8 +890,8 @@ html, body {
   .main-toolbar { padding: 10px 12px; gap: 8px; }
   .toolbar-left { flex: 1 1 100%; }
   .toolbar-left > button { justify-content: center; white-space: nowrap; padding: 9px 12px; }
-  .btn-add-files { flex: 2; }
-  .btn-add-folder { flex: 1; }
+  .btn-add-files { flex: 1 1 100%; }
+  .btn-add-folder { flex: 1; padding: 9px 8px; }
   .toolbar-right { flex: 1 1 100%; justify-content: space-between; }
 
   .drop-zone { margin: 12px; padding: 28px 16px; }
@@ -863,7 +907,7 @@ html, body {
   .file-name { white-space: normal; overflow-wrap: anywhere; }
   .file-actions { flex: 1 1 100%; justify-content: flex-end; }
   .file-type-badge { margin-right: auto; }
-  .btn-download, .btn-preview { padding: 8px 12px; }
+  .btn-download, .btn-preview, .btn-copy-text { padding: 8px 12px; }
 
   /* Viewer & scanner: full screen */
   .btn-preview span, .viewer-btn span { display: none; }
@@ -873,6 +917,9 @@ html, body {
   .viewer-image, .viewer-video, .viewer-pdf, .viewer-text { max-height: calc(100dvh - 60px); }
   .viewer-pdf { height: calc(100dvh - 60px); }
   .scanner-body { flex: 1; aspect-ratio: auto; }
+  .composer-text { font-size: 16px; resize: none; }   /* below 16px iOS zooms in on focus */
+  .text-card .file-info { flex: 1 1 100%; }
+  .text-card .file-thumb { display: none; }
 
   .toast { bottom: max(16px, env(safe-area-inset-bottom)); }
 }

@@ -18,7 +18,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => 
 // How long a disconnected member (phone locked, network switch…) keeps its place
 const SESSION_GRACE_MS = Number(process.env.SESSION_GRACE_MS) || 15 * 60_000;
 const MAX_CHUNK_BYTES = 80 * 1024;            // 64 KiB payload + tag/IV/GCM overhead
-const MAX_META_BYTES = 4 * 1024;
+const MAX_META_BYTES = 40 * 1024;             // encrypted file metadata, or a shared text (8 000 chars max)
 const MAX_CTRL_BYTES = 1024;
 const RELAY_BYTES_PER_MIN = Number(process.env.RELAY_BYTES_PER_MIN) || 300 * 1024 * 1024;
 const MAX_SALONS = 10_000;

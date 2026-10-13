@@ -165,6 +165,8 @@ Si la connexion WebRTC directe échoue (NAT strict, pare-feu), les morceaux chif
 - « Ouvrir » sur un fichier téléchargé : aperçu intégré, ou menu système « Ouvrir avec… » (Web Share API) pour les autres formats (docx, zip…) sur mobile, Windows et macOS
 - Scanner de QR code intégré (caméra) pour rejoindre un salon ; ouvrir un lien d'invitation fait entrer directement dans le salon
 - Interface mobile : barre compacte avec panneaux « Inviter » / « Membres », cartes de fichiers adaptées, zones sûres des écrans à encoche
+- Partage de **textes et de liens** (bouton « Texte », Ctrl+V dans le salon, ou glisser un lien) : chiffrés comme les fichiers, liens cliquables, bouton « Copier ». Jusqu'à 8 000 caractères. Ils restent lisibles quand leur auteur est en veille et survivent à un rechargement de sa page.
+- Coller une capture d'écran ou un fichier (Ctrl+V) le partage directement
 - Dossiers (bouton ou glisser-déposer) avec conservation de l'arborescence
 - « Tout télécharger (.zip) » : récupère tous les fichiers du salon dans une archive
 - Retrait automatique des fichiers d'un membre qui se déconnecte

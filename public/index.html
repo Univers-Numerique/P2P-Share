@@ -182,6 +182,10 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
               Dossier
             </button>
+            <button class="btn-add-folder" id="btn-add-text" title="Partager un texte ou un lien">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              Texte
+            </button>
           </div>
           <div class="toolbar-right">
             <div class="files-count" id="files-count">0 fichier</div>
@@ -211,8 +215,8 @@
           <div class="empty-icon">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
           </div>
-          <div class="empty-title">Aucun fichier dans le salon</div>
-          <div class="empty-sub">Ajoutez des fichiers pour les partager avec les membres connectés.</div>
+          <div class="empty-title">Rien de partagé pour l'instant</div>
+          <div class="empty-sub">Ajoutez des fichiers, du texte ou des liens pour les partager avec les membres connectés.</div>
         </div>
       </main>
     </div>
@@ -253,6 +257,27 @@
         </button>
       </div>
       <div class="viewer-body" id="viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- TEXT / LINK COMPOSER -->
+  <div class="viewer composer" id="composer" hidden>
+    <div class="viewer-backdrop" id="composer-backdrop"></div>
+    <div class="viewer-panel composer-panel" role="dialog" aria-modal="true" aria-labelledby="composer-title">
+      <div class="viewer-header">
+        <div class="viewer-title" id="composer-title">Partager un texte ou un lien</div>
+        <button class="viewer-btn viewer-close" id="composer-close" title="Fermer (Échap)" aria-label="Fermer">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="composer-body">
+        <textarea id="composer-text" class="composer-text" maxlength="8000" placeholder="Collez ou écrivez un texte, un lien, un code…" aria-label="Texte à partager" spellcheck="false"></textarea>
+        <div class="composer-footer">
+          <span class="composer-count" id="composer-count">0 / 8000</span>
+          <button class="viewer-btn" id="composer-paste" hidden>Coller</button>
+          <button class="btn-create composer-send" id="composer-send" disabled>Partager</button>
+        </div>
+      </div>
     </div>
   </div>
 

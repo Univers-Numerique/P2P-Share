@@ -22,6 +22,8 @@ const SESSION_KEY = 'p2pshare-session';
 const PSEUDO_KEY = 'p2pshare-pseudo';
 const PREVIEW_MAX_BYTES = 300 * 1024 * 1024;  // larger remote files must be downloaded before opening
 const TEXT_PREVIEW_MAX = 1024 * 1024;
+const TEXT_SHARE_MAX = 8000;                  // characters in a shared text / link
+const TEXTS_KEY = 'p2pshare-texts';
 
 // Previewable formats, keyed by extension. The MIME type always comes from this table,
 // never from the sender, so a remote file can't make the browser render it as HTML.
@@ -54,7 +56,7 @@ let zipping = false;
 
 // members: Map<memberId, { pseudo, isHost, peerId, conn, retries, retryTimer }>
 const members = new Map();
-// myFiles: Map<fileId, { file, name, size, mimeType }>
+// myFiles: Map<fileId, { file, name, size, mimeType }>, or { kind: 'text', text, at } for a shared text / link
 const myFiles = new Map();
 // remoteFiles: Map<fileId, { fileId, name, size, mimeType, senderMemberId, senderPseudo }>
 const remoteFiles = new Map();
@@ -508,6 +510,7 @@ function getSession() {
 
 function saveSession(session) {
   storageSet(sessionStorage, SESSION_KEY, session ? JSON.stringify(session) : null);
+  if (!session) storageSet(sessionStorage, TEXTS_KEY, null);
 }
 
 function startSession(res) {
@@ -575,7 +578,9 @@ async function resumeSession(session) {
   myMemberId = res.memberId;
   sessionToken = session.token;
   enterSalon(res.salonId, res.isHost, res.members);
-  socket.emit('file-sync', { fileIds: [] });   // files shared before the reload are gone
+  restoreTexts();
+  // Files shared before the reload are gone (the browser lost them); texts were kept
+  socket.emit('file-sync', { fileIds: [...myFiles.keys()] });
 }
 
 // Socket reconnected (screen unlocked, network back): same member, same files
@@ -637,6 +642,7 @@ function enterSalon(sid, host, memberInfos) {
 
 function resetSalon() {
   closeViewer();
+  closeComposer();
   setMobilePanel(null);
   localCopies.clear();
   for (const url of tabUrls) URL.revokeObjectURL(url);
@@ -977,7 +983,7 @@ function handleCtrl(from, msg, via) {
 // ── SEND FILE ─────────────────────────────────────────────────────
 async function sendFile(to, via, transferId, fileId) {
   const fd = myFiles.get(fileId);
-  if (!fd || uploads.has(transferId)) {
+  if (!fd || fd.kind === 'text' || uploads.has(transferId)) {
     trySendCtrl(to, via, { t: 'err', tid: transferId });
     return;
   }
@@ -1159,7 +1165,10 @@ function armTimeout(d) {
 async function announceFile(fileId, to) {
   const fd = myFiles.get(fileId);
   if (!fd || !cryptoKey) return;
-  const plain = textEnc.encode(JSON.stringify({ name: fd.name, size: fd.size, type: fd.mimeType }));
+  const payload = fd.kind === 'text'
+    ? { kind: 'text', text: fd.text, at: fd.at }
+    : { name: fd.name, size: fd.size, type: fd.mimeType };
+  const plain = textEnc.encode(JSON.stringify(payload));
   const meta = await encryptBytes(plain, textEnc.encode('meta:' + fileId));
   socket.emit('file-announce', to ? { fileId, meta: meta.buffer, to } : { fileId, meta: meta.buffer });
 }
@@ -1172,19 +1181,34 @@ async function onFileAnnounced({ from, fileId, meta }) {
 
   const plain = await decryptBytes(new Uint8Array(meta), textEnc.encode('meta:' + fileId));
   const obj = JSON.parse(textDec.decode(plain));
-  if (!Number.isSafeInteger(obj.size) || obj.size < 0 || typeof obj.name !== 'string') return;
   if (!members.has(from)) return;
 
-  const info = {
-    fileId,
-    name: cleanPath(obj.name),
-    size: obj.size,
-    mimeType: typeof obj.type === 'string' ? obj.type.slice(0, 128) : '',
-    senderMemberId: from,
-    senderPseudo: sender.pseudo
-  };
+  let info;
+  if (obj.kind === 'text') {
+    // Shared text / link: the content travels with the announcement itself
+    const text = typeof obj.text === 'string' ? cleanText(obj.text) : '';
+    if (!text || text.length > TEXT_SHARE_MAX) return;
+    info = {
+      fileId, kind: 'text', text, name: '', size: 0,
+      at: Number.isSafeInteger(obj.at) ? obj.at : Date.now(),
+      senderMemberId: from, senderPseudo: sender.pseudo
+    };
+  } else {
+    if (!Number.isSafeInteger(obj.size) || obj.size < 0 || typeof obj.name !== 'string') return;
+    info = {
+      fileId,
+      name: cleanPath(obj.name),
+      size: obj.size,
+      mimeType: typeof obj.type === 'string' ? obj.type.slice(0, 128) : '',
+      senderMemberId: from,
+      senderPseudo: sender.pseudo
+    };
+  }
   remoteFiles.set(fileId, info);
-  if (!existing) renderRemoteFileCard(info);
+  if (!existing) {
+    if (info.kind === 'text') renderTextCard(fileId);
+    else renderRemoteFileCard(info);
+  }
   updateFilesUI();
 }
 
@@ -1203,6 +1227,7 @@ function addFiles(entries) {
 function removeMyFile(fileId) {
   if (viewerFileId === fileId) closeViewer();
   myFiles.delete(fileId);
+  persistTexts();
   for (const up of uploads.values()) if (up.fileId === fileId) up.cancelled = true;
   removeFileCard(fileId);
   socket.emit('file-remove', { fileId });
@@ -1390,12 +1415,220 @@ function renderUploadStatus(fileId) {
 
 function updateFilesUI() {
   const total = myFiles.size + remoteFiles.size;
+  const hasFiles = [...myFiles.values(), ...remoteFiles.values()].some(f => f.kind !== 'text');
   dropZone.classList.toggle('visible', total === 0);
   emptyState.classList.toggle('hidden', total > 0);
   filesList.classList.toggle('hidden', total === 0);
-  btnZip.disabled = total === 0 || zipping;
-  filesCount.textContent = total === 0 ? '0 fichier' : total === 1 ? '1 fichier' : `${total} fichiers`;
+  btnZip.disabled = !hasFiles || zipping;   // shared texts are not part of the archive
+  filesCount.textContent = total <= 1 ? `${total} élément` : `${total} éléments`;
 }
+
+// ── SHARED TEXT / LINKS ───────────────────────────────────────────
+const ICON_COPY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const ICON_EXTERNAL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+
+// Keeps line breaks and tabs, drops other control characters
+function cleanText(str) {
+  return String(str).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
+}
+
+function safeHttpUrl(str) {
+  try {
+    const url = new URL(str);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// The whole text is one link: the card gets an "Ouvrir" button
+function singleUrl(text) {
+  return /^https?:\/\/\S+$/.test(text) ? safeHttpUrl(text) : null;
+}
+
+// Fills `container` with the text, turning http(s) URLs into links. Everything goes through
+// text nodes and validated hrefs, so a shared text can never inject markup.
+function linkify(container, text) {
+  container.replaceChildren();
+  const re = /https?:\/\/[^\s<>"']+/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const raw = m[0].replace(/[.,;:!?)\]]+$/, '');   // trailing punctuation belongs to the sentence
+    const href = safeHttpUrl(raw);
+    if (!href) continue;
+    container.append(text.slice(last, m.index));
+    const a = document.createElement('a');
+    a.href = href;
+    a.textContent = raw;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    container.append(a);
+    last = m.index + raw.length;
+  }
+  container.append(text.slice(last));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard API unavailable or refused: fall back to a hidden textarea
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (!ok) { showToast('Copie impossible sur ce navigateur.'); return; }
+  }
+  showToast('Copié.');
+}
+
+function shareText(input) {
+  const text = cleanText(input).slice(0, TEXT_SHARE_MAX);
+  if (!salonId || !text) return;
+  const fileId = randomHex(8);
+  myFiles.set(fileId, { kind: 'text', text, at: Date.now(), name: '', size: 0 });
+  renderTextCard(fileId);
+  announceFile(fileId).catch(err => console.warn('announce:', err));
+  persistTexts();
+  updateFilesUI();
+}
+
+// Our own texts survive a page reload (files can't: the browser loses access to them)
+function persistTexts() {
+  const items = [...myFiles].filter(([, f]) => f.kind === 'text').map(([fileId, f]) => ({ fileId, text: f.text, at: f.at }));
+  storageSet(sessionStorage, TEXTS_KEY, items.length ? JSON.stringify({ salonId, items }) : null);
+}
+
+function restoreTexts() {
+  let saved = null;
+  try { saved = JSON.parse(storageGet(sessionStorage, TEXTS_KEY)); } catch { /* corrupted */ }
+  if (!saved || saved.salonId !== salonId || !Array.isArray(saved.items)) return;
+  for (const item of saved.items) {
+    const text = typeof item.text === 'string' ? cleanText(item.text).slice(0, TEXT_SHARE_MAX) : '';
+    if (!ID_RE.test(item.fileId) || !text || myFiles.has(item.fileId)) continue;
+    myFiles.set(item.fileId, { kind: 'text', text, at: Number.isSafeInteger(item.at) ? item.at : Date.now(), name: '', size: 0 });
+    renderTextCard(item.fileId);
+    announceFile(item.fileId).catch(err => console.warn('announce:', err));
+  }
+  updateFilesUI();
+}
+
+function renderTextCard(fileId) {
+  const own = myFiles.has(fileId);
+  const info = myFiles.get(fileId) || remoteFiles.get(fileId);
+  if (!info || document.getElementById('fc-' + fileId)) return;
+  const url = singleUrl(info.text);
+  const time = new Date(info.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+
+  const card = document.createElement('div');
+  card.className = 'file-card text-card';
+  card.id = 'fc-' + fileId;
+  card.innerHTML = `
+    <div class="file-thumb">${url ? '🔗' : '💬'}</div>
+    <div class="file-info">
+      <div class="text-body clamped"></div>
+      <button class="btn-more" hidden>Afficher plus</button>
+      <div class="file-meta">
+        <span class="file-sender">${escapeHtml(own ? 'Vous' : info.senderPseudo)}</span>
+        <span>${time}</span>
+      </div>
+    </div>
+    <div class="file-actions">
+      <span class="file-type-badge ${url ? 'badge-link' : 'badge-text'}">${url ? 'Lien' : 'Texte'}</span>
+      ${url ? `<a class="btn-preview" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Ouvrir le lien">${ICON_EXTERNAL} <span>Ouvrir</span></a>` : ''}
+      <button class="btn-copy-text" title="Copier dans le presse-papiers">${ICON_COPY} Copier</button>
+      ${own ? `<button class="btn-remove" title="Retirer" aria-label="Retirer">${ICON_REMOVE}</button>` : ''}
+    </div>
+  `;
+
+  const body = card.querySelector('.text-body');
+  linkify(body, info.text);
+  const more = card.querySelector('.btn-more');
+  if (info.text.length > 280 || info.text.split('\n').length > 4) {
+    more.hidden = false;
+    more.addEventListener('click', () => {
+      const clamped = body.classList.toggle('clamped');
+      more.textContent = clamped ? 'Afficher plus' : 'Afficher moins';
+    });
+  } else {
+    body.classList.remove('clamped');
+  }
+  card.querySelector('.btn-copy-text').addEventListener('click', () => copyText(info.text));
+  card.querySelector('.btn-remove')?.addEventListener('click', () => removeMyFile(fileId));
+  filesList.appendChild(card);
+}
+
+// Composer dialog
+const composer      = document.getElementById('composer');
+const composerText  = document.getElementById('composer-text');
+const composerCount = document.getElementById('composer-count');
+const composerSend  = document.getElementById('composer-send');
+const composerPaste = document.getElementById('composer-paste');
+
+function updateComposer() {
+  composerCount.textContent = `${composerText.value.length} / ${TEXT_SHARE_MAX}`;
+  composerSend.disabled = !composerText.value.trim();
+}
+
+function openComposer(prefill = '') {
+  if (!salonId) return;
+  composerText.value = String(prefill).slice(0, TEXT_SHARE_MAX);
+  composerPaste.hidden = !navigator.clipboard?.readText;
+  updateComposer();
+  composer.hidden = false;
+  composerText.focus();
+}
+
+function closeComposer() {
+  composer.hidden = true;
+  composerText.value = '';
+}
+
+function submitComposer() {
+  if (!composerText.value.trim()) return;
+  shareText(composerText.value);
+  closeComposer();
+}
+
+document.getElementById('btn-add-text').addEventListener('click', () => openComposer());
+document.getElementById('composer-close').addEventListener('click', closeComposer);
+document.getElementById('composer-backdrop').addEventListener('click', closeComposer);
+composerSend.addEventListener('click', submitComposer);
+composerText.addEventListener('input', updateComposer);
+composerText.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComposer(); }
+});
+composerPaste.addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    composerText.value = (composerText.value + text).slice(0, TEXT_SHARE_MAX);
+    updateComposer();
+    composerText.focus();
+  } catch {
+    showToast('Accès au presse-papiers refusé : collez avec un appui long ou Ctrl+V.', 4000);
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !composer.hidden) closeComposer();
+});
+
+// Ctrl+V anywhere in the salon: pasted files (screenshots…) are shared, pasted text opens the composer
+document.addEventListener('paste', (e) => {
+  if (!inSalonScreen() || !composer.hidden || !viewer.hidden) return;
+  if (e.target.closest?.('input, textarea, [contenteditable="true"]')) return;
+  const files = [...(e.clipboardData?.files || [])];
+  const text = e.clipboardData?.getData('text/plain') || '';
+  if (files.length) {
+    e.preventDefault();
+    addFiles(files.map(file => ({ file, path: file.name })));
+  } else if (text.trim()) {
+    e.preventDefault();
+    openComposer(text);
+  }
+});
 
 // ── FILE VIEWER ───────────────────────────────────────────────────
 let viewerFileId = null;
@@ -1717,9 +1950,9 @@ async function downloadAllZip() {
   try {
     const zip = new JSZip();
     const used = new Set();
-    for (const fd of myFiles.values()) zip.file(uniquePath(fd.name, used), fd.file);
+    for (const fd of myFiles.values()) if (fd.kind !== 'text') zip.file(uniquePath(fd.name, used), fd.file);
 
-    const remotes = [...remoteFiles.values()];
+    const remotes = [...remoteFiles.values()].filter(f => f.kind !== 'text');
     let failed = 0;
     for (let i = 0; i < remotes.length; i++) {
       if (salonId !== zipSalon) return;
@@ -1824,8 +2057,13 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
   if (!inSalonScreen()) return;
+  // Read now: the DataTransfer is emptied as soon as the event handler returns
+  const droppedText = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
   collectDropped(e.dataTransfer)
-    .then(entries => { if (entries.length) addFiles(entries); })
+    .then(entries => {
+      if (entries.length) addFiles(entries);
+      else if (droppedText.trim()) openComposer(droppedText);   // dragged link or text selection
+    })
     .catch(err => showToast('Lecture impossible : ' + err.message));
 });
 
