@@ -104,6 +104,19 @@ app.get('/config', (req, res) => {
   res.json({ iceServers });
 });
 
+// Health / activity probe for deploy/update.sh. Only answers direct local requests:
+// anything that came through the reverse proxy (X-Forwarded-For) gets a 404.
+app.get('/healthz', (req, res) => {
+  const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+  if (!local || req.headers['x-forwarded-for']) return res.status(404).end();
+  let members = 0;
+  for (const salon of salons.values()) {
+    for (const m of salon.members.values()) if (m.socketId) members++;
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ ok: true, salons: salons.size, members });
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── SOCKET.IO ─────────────────────────────────────────────────────

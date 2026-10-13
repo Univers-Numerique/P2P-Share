@@ -91,7 +91,34 @@ Ajoutez `--turn` pour installer aussi un serveur TURN (coturn) : les connexions 
 
 ### 3. Mises à jour
 
-Poussez sur `main`, puis relancez **la même commande** : le script récupère le code, réinstalle les dépendances et redémarre le service. La configuration et le certificat sont conservés.
+Une fois le nouveau code poussé sur `main`, sur le VPS :
+
+```bash
+sudo p2pshare-update
+```
+
+La première fois (le raccourci n'existe pas encore) :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Univers-Numerique/P2P-Share/main/deploy/update.sh | sudo bash
+```
+
+Le script [deploy/update.sh](deploy/update.sh) :
+
+1. récupère la dernière version et liste les changements ;
+2. **refuse de continuer si des salons sont ouverts** : les salons vivent dans la mémoire du serveur, un redémarrage les ferme et coupe les transferts en cours. Réessayez plus tard, ou forcez avec `--yes` ;
+3. installe le code, réinstalle les dépendances seulement si elles ont changé, puis redémarre le service ;
+4. vérifie que le service répond. **S'il ne démarre pas, il revient tout seul à la version précédente.**
+
+| Option | Effet |
+|---|---|
+| `--check` | Affiche ce qui serait mis à jour et le nombre de salons ouverts, sans rien changer |
+| `--yes`, `-y` | Met à jour même si des salons sont ouverts |
+| `--rollback` | Revient à la version d'avant la dernière mise à jour |
+| `--force` | Réinstalle et redémarre même si le code est déjà à jour |
+| `--branch NOM` | Autre branche que celle installée |
+
+La configuration (`/etc/p2pshare/p2pshare.env`), le certificat et Nginx ne sont pas touchés. Si une version modifie la configuration système (Nginx, service, pare-feu), le script le signale : relancez alors `deploy/install.sh` avec vos options habituelles.
 
 ### Exploitation
 
