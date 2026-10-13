@@ -14,6 +14,8 @@
 #    3. installe le code, les dépendances si elles ont changé, puis redémarre le service ;
 #    4. vérifie que le service répond ; sinon revient tout seul à la version précédente.
 #
+#  Le dossier, le service systemd et le port sont détectés automatiquement.
+#
 #  Options :
 #    --check        Affiche ce qui serait mis à jour, sans rien changer
 #    --yes, -y      Met à jour même si des salons sont ouverts (ils seront fermés)
@@ -23,9 +25,12 @@
 # ══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/p2pshare}"
-SERVICE="${SERVICE:-p2pshare}"
-ENV_FILE="${ENV_FILE:-/etc/p2pshare/p2pshare.env}"
+# Tout est détecté automatiquement ; ces variables servent seulement à forcer une valeur :
+#   sudo env APP_DIR=/opt/autre SERVICE=autre PORT=4000 bash update.sh
+APP_DIR="${APP_DIR:-}"
+SERVICE="${SERVICE:-}"
+PORT="${PORT:-}"
+ENV_FILE="${ENV_FILE:-}"
 STATE_DIR="${STATE_DIR:-/var/lib/p2pshare}"
 SHORTCUT="${SHORTCUT:-/usr/local/bin/p2pshare-update}"
 PREVIOUS_FILE="$STATE_DIR/previous-commit"
@@ -35,23 +40,66 @@ ASSUME_YES=0
 FORCE=0
 BRANCH=""
 
+# Never wait for a key press: no pager (git log would open `less` in a terminal), no password prompt
+export GIT_PAGER=cat PAGER=cat GIT_TERMINAL_PROMPT=0
+
 # ── Helpers ───────────────────────────────────────────────────────
 info() { printf '\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m✔ %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
 
-app_git() { git -C "$APP_DIR" "$@"; }
+# safe.directory: root may run git in a folder owned by the service user
+app_git() { git --no-pager -c safe.directory="$APP_DIR" -C "$APP_DIR" "$@"; }
 short()   { app_git rev-parse --short "$1"; }
 
-app_port() {
-  local port=""
-  [[ -f "$ENV_FILE" ]] && port=$(grep -E '^PORT=' "$ENV_FILE" | head -n1 | cut -d= -f2- || true)
-  echo "${port:-3000}"
+# Installation folder: the usual names, unless APP_DIR is given
+detect_app_dir() {
+  [[ -n "$APP_DIR" ]] && return 0
+  local dir
+  for dir in /opt/p2pshare /opt/p2p-share /opt/P2P-Share /srv/p2pshare /var/www/p2pshare; do
+    if [[ -d "$dir/.git" && -f "$dir/server.js" ]]; then APP_DIR="$dir"; return 0; fi
+  done
+  APP_DIR="/opt/p2pshare"
+}
+
+# systemd service: a usual name, or the unit whose working directory is the installation folder
+detect_service() {
+  [[ -n "$SERVICE" ]] && return 0
+  local name unit
+  for name in p2pshare p2p-share "$(basename "$APP_DIR")"; do
+    if systemctl cat "$name.service" >/dev/null 2>&1; then SERVICE="$name"; return 0; fi
+  done
+  unit=$(grep -ls "^WorkingDirectory=$APP_DIR/\?\$" /etc/systemd/system/*.service 2>/dev/null | head -n1 || true)
+  if [[ -n "$unit" ]]; then SERVICE=$(basename "$unit" .service); return 0; fi
+  SERVICE="p2pshare"
+}
+
+# Port the app listens on: env file, then the unit, then what the running process has open
+detect_port() {
+  [[ -n "$PORT" ]] && return 0
+  local file pid
+  if [[ -z "$ENV_FILE" ]]; then
+    ENV_FILE=$(systemctl show "$SERVICE" -p EnvironmentFiles --value 2>/dev/null | awk '{print $1}' || true)
+    [[ -n "$ENV_FILE" ]] || ENV_FILE="/etc/p2pshare/p2pshare.env"
+  fi
+  for file in "$ENV_FILE" "$APP_DIR/.env"; do
+    if [[ -f "$file" ]]; then
+      PORT=$(grep -E '^PORT=' "$file" | head -n1 | cut -d= -f2- | tr -d "\"' " || true)
+      [[ -n "$PORT" ]] && return 0
+    fi
+  done
+  PORT=$(systemctl show "$SERVICE" -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^PORT=//p' | head -n1 || true)
+  [[ -n "$PORT" ]] && return 0
+  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)
+  if [[ -n "$pid" && "$pid" != "0" ]]; then
+    PORT=$(ss -Hltnp 2>/dev/null | grep "pid=$pid," | awk '{n=split($4,a,":"); print a[n]}' | head -n1 || true)
+  fi
+  [[ -n "$PORT" ]] || PORT=3000
 }
 
 is_healthy() {
-  curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$(app_port)/"
+  curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$PORT/"
 }
 
 wait_healthy() {
@@ -65,7 +113,7 @@ wait_healthy() {
 # Prints the number of open salons, or nothing when the running version has no /healthz yet
 active_salons() {
   local body
-  body=$(curl -fsS -m 5 "http://127.0.0.1:$(app_port)/healthz" 2>/dev/null) || return 0
+  body=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/healthz" 2>/dev/null) || return 0
   echo "$body" | sed -n 's/.*"salons":\([0-9][0-9]*\).*/\1/p'
 }
 
@@ -78,13 +126,20 @@ deploy_commit() {
     info "Dépendances modifiées : installation"
     (cd "$APP_DIR" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error) || return 1
   fi
+  # Keep the files with whoever owned the folder before (root, or the service user).
+  # Cosmetic: a failure here must never abort a deployment or a rollback.
+  if [[ "$APP_OWNER" != "0:0" ]]; then
+    chown -R "$APP_OWNER" "$APP_DIR" 2>/dev/null || warn "Propriétaire des fichiers non rétabli ($APP_OWNER)"
+  fi
   systemctl restart "$SERVICE" || return 1
   wait_healthy || return 1
 }
 
+# The shortcut remembers this installation's folder, service and port
 install_shortcut() {
   [[ -f "$SHORTCUT" ]] && return 0
-  printf '#!/bin/sh\nexec bash %s/deploy/update.sh "$@"\n' "$APP_DIR" > "$SHORTCUT" 2>/dev/null && chmod +x "$SHORTCUT" \
+  printf '#!/bin/sh\nexec env APP_DIR="%s" SERVICE="%s" PORT="%s" bash "%s/deploy/update.sh" "$@"\n' \
+    "$APP_DIR" "$SERVICE" "$PORT" "$APP_DIR" > "$SHORTCUT" 2>/dev/null && chmod +x "$SHORTCUT" \
     && ok "Raccourci créé : la prochaine fois, lancez simplement « sudo p2pshare-update »" || true
 }
 
@@ -96,17 +151,31 @@ while [[ $# -gt 0 ]]; do
     --yes|-y)   ASSUME_YES=1; shift ;;
     --force)    FORCE=1; shift ;;
     --branch)   BRANCH="${2:?--branch attend une valeur}"; shift 2 ;;
-    -h|--help)  sed -n '2,23p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help)  sed -n '2,25p' "$0" 2>/dev/null || true; exit 0 ;;
     *)          die "Option inconnue : $1 (voir --help)" ;;
   esac
 done
 
 # ── Pré-requis ────────────────────────────────────────────────────
 [[ $EUID -eq 0 || "${ALLOW_NON_ROOT:-0}" == "1" ]] || die "Lancez ce script en root (sudo)."
-[[ -d "$APP_DIR/.git" ]] || die "P2P Share n'est pas installé dans $APP_DIR. Faites d'abord l'installation avec deploy/install.sh."
 for cmd in git curl npm systemctl; do
   command -v "$cmd" >/dev/null || die "Commande manquante : $cmd"
 done
+detect_app_dir
+[[ -d "$APP_DIR/.git" ]] || die "P2P Share est introuvable dans $APP_DIR. Indiquez son dossier : sudo env APP_DIR=/chemin bash update.sh"
+detect_service
+if [[ "${ALLOW_NON_ROOT:-0}" != "1" ]] && ! systemctl cat "$SERVICE.service" >/dev/null 2>&1; then
+  die "Service systemd « $SERVICE » introuvable. Indiquez son nom : sudo env SERVICE=nom bash update.sh"
+fi
+detect_port
+APP_OWNER=$(stat -c '%u:%g' "$APP_DIR" 2>/dev/null || echo "0:0")   # numeric: always valid for chown
+echo "Installation : $APP_DIR · service $SERVICE · port $PORT"
+
+# If the service can't be reached now, the check after the update would fail too and trigger
+# a pointless rollback: better stop before touching anything.
+if [[ "$MODE" != "check" ]] && ! is_healthy 2>/dev/null; then
+  die "Le service ne répond pas sur http://127.0.0.1:$PORT avant même la mise à jour. S'il écoute sur un autre port, indiquez-le : sudo env PORT=xxxx bash update.sh (état du service : systemctl status $SERVICE)"
+fi
 
 CURRENT=$(app_git rev-parse HEAD)
 [[ -n "$BRANCH" ]] || BRANCH=$(app_git rev-parse --abbrev-ref HEAD)

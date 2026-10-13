@@ -118,6 +118,8 @@ Le script [deploy/update.sh](deploy/update.sh) :
 | `--force` | Réinstalle et redémarre même si le code est déjà à jour |
 | `--branch NOM` | Autre branche que celle installée |
 
+Le dossier d'installation, le service systemd et le port sont **détectés automatiquement** (y compris pour une installation faite à la main, par exemple dans `/opt/p2p-share`). Pour forcer une valeur : `sudo env APP_DIR=/chemin SERVICE=nom PORT=3000 bash update.sh`. Avant de modifier quoi que ce soit, le script vérifie que le service répond bien sur ce port.
+
 La configuration (`/etc/p2pshare/p2pshare.env`), le certificat et Nginx ne sont pas touchés. Si une version modifie la configuration système (Nginx, service, pare-feu), le script le signale : relancez alors `deploy/install.sh` avec vos options habituelles.
 
 ### Exploitation
