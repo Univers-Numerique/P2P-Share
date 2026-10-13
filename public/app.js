@@ -24,6 +24,7 @@ const PREVIEW_MAX_BYTES = 300 * 1024 * 1024;  // larger remote files must be dow
 const TEXT_PREVIEW_MAX = 1024 * 1024;
 const TEXT_SHARE_MAX = 8000;                  // characters in a shared text / link
 const TEXTS_KEY = 'p2pshare-texts';
+const CLOCK_KEY = 'p2pshare-clock';
 
 // Previewable formats, keyed by extension. The MIME type always comes from this table,
 // never from the sender, so a remote file can't make the browser render it as HTML.
@@ -517,10 +518,15 @@ function getSession() {
 
 function saveSession(session) {
   storageSet(sessionStorage, SESSION_KEY, session ? JSON.stringify(session) : null);
-  if (!session) storageSet(sessionStorage, TEXTS_KEY, null);
+  if (!session) {
+    storageSet(sessionStorage, TEXTS_KEY, null);
+    storageSet(sessionStorage, CLOCK_KEY, null);
+  }
 }
 
 function startSession(res) {
+  lamport = 0;
+  storageSet(sessionStorage, CLOCK_KEY, null);
   myMemberId = res.memberId;
   sessionToken = res.token;
   saveSession({ salonId: res.salonId, memberId: res.memberId, token: res.token, key: salonKey });
@@ -584,6 +590,8 @@ async function resumeSession(session) {
   }
   myMemberId = res.memberId;
   sessionToken = session.token;
+  // Resume the thread clock, so a message sent right after the reload still goes last
+  lamport = Number.parseInt(storageGet(sessionStorage, CLOCK_KEY), 10) || 0;
   enterSalon(res.salonId, res.isHost, res.members);
   restoreTexts();
   // Files shared before the reload are gone (the browser lost them); texts were kept
@@ -642,7 +650,7 @@ function enterSalon(sid, host, memberInfos) {
   linkDisplay.textContent = url;
   sidebarSalonId.textContent = sid;
 
-  addSystemLine('🔒 Messages et fichiers chiffrés de bout en bout : le serveur ne peut pas les lire.', 0);   // pinned on top
+  addSystemLine('🔒 Messages et fichiers chiffrés de bout en bout : le serveur ne peut pas les lire.', { pinned: true });
   addSystemLine(host ? 'Salon ouvert. Partagez le lien pour inviter.' : 'Vous avez rejoint le salon');
   updateFilesUI();
   showScreen('screen-salon');
@@ -667,7 +675,7 @@ function resetSalon() {
   for (const id of [...members.keys()]) closeConn(id);
   if (peer) { try { peer.destroy(); } catch { /* already destroyed */ } peer = null; }
   salonId = null; salonKey = null; cryptoKey = null; authToken = null; isHost = false;
-  myMemberId = null; sessionToken = null;
+  myMemberId = null; sessionToken = null; lamport = 0;
   members.clear(); myFiles.clear(); remoteFiles.clear();
   membersList.innerHTML = '';
   filesList.innerHTML = '';
@@ -1181,8 +1189,8 @@ async function announceFile(fileId, to) {
   const fd = myFiles.get(fileId);
   if (!fd || !cryptoKey) return;
   const payload = fd.kind === 'text'
-    ? { kind: 'text', text: fd.text, at: fd.at }
-    : { name: fd.name, size: fd.size, type: fd.mimeType, at: fd.at };
+    ? { kind: 'text', text: fd.text, at: fd.at, seq: fd.seq }
+    : { name: fd.name, size: fd.size, type: fd.mimeType, at: fd.at, seq: fd.seq };
   const plain = textEnc.encode(JSON.stringify(payload));
   const meta = await encryptBytes(plain, textEnc.encode('meta:' + fileId));
   socket.emit('file-announce', to ? { fileId, meta: meta.buffer, to } : { fileId, meta: meta.buffer });
@@ -1198,14 +1206,16 @@ async function onFileAnnounced({ from, fileId, meta }) {
   const obj = JSON.parse(textDec.decode(plain));
   if (!members.has(from)) return;
 
-  // The sender's clock orders the thread; never trust a date from the future
+  // `at` is only the time shown under the bubble; the thread is ordered by `seq`
   const at = Number.isSafeInteger(obj.at) ? Math.min(obj.at, Date.now() + 60_000) : Date.now();
+  const seq = Number.isSafeInteger(obj.seq) && obj.seq > 0 && obj.seq < 1e12 ? obj.seq : lamport + 1;
+  observeSeq(seq);
   let info;
   if (obj.kind === 'text') {
     // Message / link: the content travels with the announcement itself
     const text = typeof obj.text === 'string' ? cleanText(obj.text) : '';
     if (!text || text.length > TEXT_SHARE_MAX) return;
-    info = { fileId, kind: 'text', text, name: '', size: 0, at, senderMemberId: from, senderPseudo: sender.pseudo };
+    info = { fileId, kind: 'text', text, name: '', size: 0, at, seq, senderMemberId: from, senderPseudo: sender.pseudo };
   } else {
     if (!Number.isSafeInteger(obj.size) || obj.size < 0 || typeof obj.name !== 'string') return;
     info = {
@@ -1214,6 +1224,7 @@ async function onFileAnnounced({ from, fileId, meta }) {
       size: obj.size,
       mimeType: typeof obj.type === 'string' ? obj.type.slice(0, 128) : '',
       at,
+      seq,
       senderMemberId: from,
       senderPseudo: sender.pseudo
     };
@@ -1234,7 +1245,7 @@ function addFiles(entries) {
   if (!salonId) return;
   for (const { file, path } of entries) {
     const fileId = randomHex(8);
-    myFiles.set(fileId, { file, name: cleanPath(path || file.name), size: file.size, mimeType: file.type, at: Date.now() });
+    myFiles.set(fileId, { file, name: cleanPath(path || file.name), size: file.size, mimeType: file.type, at: Date.now(), seq: nextSeq() });
     renderItem(fileId);
     announceFile(fileId).catch(err => console.warn('announce:', err));
   }
@@ -1245,7 +1256,7 @@ function sendMessage(input) {
   const text = cleanText(input).slice(0, TEXT_SHARE_MAX);
   if (!salonId || !text) return;
   const fileId = randomHex(8);
-  myFiles.set(fileId, { kind: 'text', text, at: Date.now(), name: '', size: 0 });
+  myFiles.set(fileId, { kind: 'text', text, at: Date.now(), seq: nextSeq(), name: '', size: 0 });
   renderItem(fileId);
   announceFile(fileId).catch(err => console.warn('announce:', err));
   persistTexts();
@@ -1254,7 +1265,7 @@ function sendMessage(input) {
 
 // Our own messages survive a page reload (files can't: the browser loses access to them)
 function persistTexts() {
-  const items = [...myFiles].filter(([, f]) => f.kind === 'text').map(([fileId, f]) => ({ fileId, text: f.text, at: f.at }));
+  const items = [...myFiles].filter(([, f]) => f.kind === 'text').map(([fileId, f]) => ({ fileId, text: f.text, at: f.at, seq: f.seq }));
   storageSet(sessionStorage, TEXTS_KEY, items.length ? JSON.stringify({ salonId, items }) : null);
 }
 
@@ -1265,7 +1276,9 @@ function restoreTexts() {
   for (const item of saved.items) {
     const text = typeof item.text === 'string' ? cleanText(item.text).slice(0, TEXT_SHARE_MAX) : '';
     if (!ID_RE.test(item.fileId) || !text || myFiles.has(item.fileId)) continue;
-    myFiles.set(item.fileId, { kind: 'text', text, at: Number.isSafeInteger(item.at) ? item.at : Date.now(), name: '', size: 0 });
+    const seq = Number.isSafeInteger(item.seq) && item.seq > 0 ? item.seq : nextSeq();
+    observeSeq(seq);
+    myFiles.set(item.fileId, { kind: 'text', text, at: Number.isSafeInteger(item.at) ? item.at : Date.now(), seq, name: '', size: 0 });
     renderItem(item.fileId, { quiet: true });
     announceFile(item.fileId).catch(err => console.warn('announce:', err));
   }
@@ -1445,19 +1458,44 @@ function scrollToBottom() {
   newMsgPill.hidden = true;
 }
 
-// Keeps the thread sorted by date: late history (a member re-announcing) lands at its place
-function insertByDate(el, at) {
-  el.dataset.at = at;
+// ── Thread order ──
+// Device clocks disagree (a phone a few seconds behind would slip its messages above newer
+// ones), so the thread is ordered by a logical (Lamport) clock instead: every item gets a
+// number higher than anything its author had seen. Whoever writes after reading a message is
+// therefore always placed after it, and every member computes the same order.
+let lamport = 0;
+
+function observeSeq(seq) {
+  if (seq <= lamport) return;
+  lamport = seq;
+  storageSet(sessionStorage, CLOCK_KEY, String(lamport));
+}
+
+function nextSeq() {
+  observeSeq(lamport + 1);
+  return lamport;
+}
+
+// rank: 0 = message / file, 1 = local system line (shown after the items it follows).
+// tie: breaks ties between items written at the same time by different members.
+function threadOrder(a, b) {
+  return (Number(a.seq) - Number(b.seq)) || (Number(a.rank) - Number(b.rank))
+    || (a.tie < b.tie ? -1 : a.tie > b.tie ? 1 : 0);
+}
+
+// Late history (a member re-announcing what it shared) lands at its place
+function insertInOrder(el, key) {
+  Object.assign(el.dataset, key);
   let ref = filesList.lastElementChild;
-  while (ref && Number(ref.dataset.at) > at) ref = ref.previousElementSibling;
+  while (ref && threadOrder(ref.dataset, el.dataset) > 0) ref = ref.previousElementSibling;
   if (ref) ref.after(el);
   else filesList.prepend(el);
 }
 
 // Adds an element to the thread and handles scrolling / unread counters
-function addToThread(el, at, { own = false, quiet = false } = {}) {
+function addToThread(el, key, { own = false, quiet = false } = {}) {
   const stick = own || isNearBottom();
-  insertByDate(el, at);
+  insertInOrder(el, key);
   regroupThread();
   if (stick) {
     scrollToBottom();
@@ -1472,11 +1510,12 @@ function addToThread(el, at, { own = false, quiet = false } = {}) {
   }
 }
 
-function addSystemLine(text, at = Date.now()) {
+function addSystemLine(text, { pinned = false } = {}) {
   const line = document.createElement('div');
   line.className = 'sys-line';
   line.textContent = text;
-  addToThread(line, at, { quiet: true });
+  // Placed after everything seen so far; later messages get a higher seq and go below
+  addToThread(line, { seq: pinned ? -1 : lamport, rank: 1, tie: '' }, { quiet: true });
 }
 
 // Consecutive messages from the same person within a few minutes share one name / avatar
@@ -1486,7 +1525,7 @@ function regroupThread() {
     const isMsg = el.classList.contains('msg');
     const grouped = isMsg && prev?.classList.contains('msg')
       && prev.dataset.sender === el.dataset.sender
-      && Number(el.dataset.at) - Number(prev.dataset.at) < 5 * 60_000;
+      && Math.abs(Number(el.dataset.at) - Number(prev.dataset.at)) < 5 * 60_000;
     if (isMsg) el.classList.toggle('grouped', grouped);
     prev = el;
   }
@@ -1525,7 +1564,8 @@ function renderItem(fileId, { quiet = false } = {}) {
     foot.appendChild(del);
   }
 
-  addToThread(row, info.at, { own, quiet });
+  row.dataset.at = info.at;
+  addToThread(row, { seq: info.seq, rank: 0, tie: `${own ? myMemberId : info.senderMemberId}:${fileId}` }, { own, quiet });
   if (info.kind !== 'text') {
     updatePreviewButton(fileId);
     updateThumb(fileId);
