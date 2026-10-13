@@ -3,8 +3,74 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>P2P Share — Partage éphémère & instantané</title>
-  <meta name="description" content="Partagez des fichiers directement entre appareils, sans inscription. Éphémère et chiffré de bout en bout." />
+  <title>P2P Share : envoyer des fichiers gratuitement, sans compte</title>
+  <meta name="description" content="Envoyez fichiers, photos et vidéos d'un appareil à l'autre en quelques secondes. Gratuit, sans compte ni installation, chiffré de bout en bout." />
+  <link rel="canonical" href="https://p2p.nexusnumerique.com/" />
+  <meta name="robots" content="index, follow, max-image-preview:large" />
+
+  <!-- Aperçu du lien sur WhatsApp, Facebook, LinkedIn, X… -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="P2P Share" />
+  <meta property="og:locale" content="fr_FR" />
+  <meta property="og:url" content="https://p2p.nexusnumerique.com/" />
+  <meta property="og:title" content="P2P Share : envoyez vos fichiers en 10 secondes, gratuitement" />
+  <meta property="og:description" content="D'un appareil à l'autre, seul ou à plusieurs. Sans compte, sans installation, chiffré de bout en bout." />
+  <meta property="og:image" content="https://p2p.nexusnumerique.com/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="P2P Share : partage de fichiers gratuit, sans compte, chiffré de bout en bout" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="P2P Share : envoyez vos fichiers en 10 secondes, gratuitement" />
+  <meta name="twitter:description" content="D'un appareil à l'autre, seul ou à plusieurs. Sans compte, sans installation, chiffré de bout en bout." />
+  <meta name="twitter:image" content="https://p2p.nexusnumerique.com/og-image.png" />
+
+  <!-- Données structurées : ce que Google comprend de la page -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebApplication",
+        "@id": "https://p2p.nexusnumerique.com/#app",
+        "name": "P2P Share",
+        "url": "https://p2p.nexusnumerique.com/",
+        "description": "Application web de partage de fichiers, de messages et de liens d'un appareil à l'autre, chiffrée de bout en bout, sans compte ni installation.",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Android, iOS, Windows, macOS, Linux",
+        "browserRequirements": "Navigateur récent avec JavaScript",
+        "inLanguage": "fr",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" },
+        "featureList": [
+          "Transfert direct d'appareil à appareil (WebRTC)",
+          "Chiffrement de bout en bout",
+          "Sans compte ni installation",
+          "Invitation par lien ou QR code",
+          "Messages et liens dans un fil de discussion",
+          "Aucun fichier stocké sur un serveur"
+        ]
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://p2p.nexusnumerique.com/#faq",
+        "mainEntity": [
+          { "@type": "Question", "name": "P2P Share est-il vraiment gratuit ?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Oui. P2P Share est gratuit, sans abonnement, sans publicité et sans inscription." } },
+          { "@type": "Question", "name": "Faut-il créer un compte ou installer une application ?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Non. Il suffit d'ouvrir le site dans un navigateur, sur téléphone ou sur ordinateur. Aucune adresse e-mail ni numéro de téléphone n'est demandé." } },
+          { "@type": "Question", "name": "Comment envoyer un fichier de mon téléphone à mon ordinateur ?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Ouvrez P2P Share sur l'ordinateur et créez un salon, scannez le QR code avec le téléphone, puis choisissez le fichier à envoyer. Il arrive directement sur l'autre appareil." } },
+          { "@type": "Question", "name": "Mes fichiers sont-ils stockés sur un serveur ?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Non. Les fichiers passent d'un appareil à l'autre et sont chiffrés de bout en bout : le serveur ne peut pas les lire et ne les conserve pas. Quand le salon est fermé, tout disparaît." } },
+          { "@type": "Question", "name": "Peut-on partager des fichiers à plusieurs ?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Oui. Tous ceux qui ouvrent le lien ou scannent le QR code rejoignent le même salon et peuvent envoyer et recevoir des fichiers, des messages et des liens." } },
+          { "@type": "Question", "name": "Les photos et vidéos sont-elles compressées ?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Non. Les fichiers sont transmis tels quels, dans leur qualité d'origine." } }
+        ]
+      }
+    ]
+  }
+  </script>
 
   <!-- PWA -->
   <link rel="manifest" href="/manifest.json" />
@@ -22,10 +88,12 @@
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
   <!-- Libs -->
-  <script src="/socket.io/socket.io.min.js"></script>
-  <script src="/vendor/peerjs.min.js"></script>
-  <script src="/vendor/qrcode.min.js"></script>
-  <script src="/vendor/jszip.min.js"></script>
+  <!-- defer: the page shows right away, scripts run in this order once it is parsed -->
+  <script defer src="/socket.io/socket.io.min.js"></script>
+  <script defer src="/vendor/peerjs.min.js"></script>
+  <script defer src="/vendor/qrcode.min.js"></script>
+  <script defer src="/vendor/jszip.min.js"></script>
+  <script defer src="/app.js"></script>
 
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -44,7 +112,7 @@
 
       <main class="home-main">
         <h1 class="hero-title">Partagez.<br><em>Instantanément.</em></h1>
-        <p class="hero-sub">Fichiers de navigateur à navigateur, chiffrés de bout en bout.<br>L'hôte part, tout disparaît.</p>
+        <p class="hero-sub">Envoyez fichiers, photos et vidéos d'un appareil à l'autre.<br><strong>Gratuit, sans compte, sans installation</strong>, chiffré de bout en bout.</p>
 
         <div class="pseudo-block">
           <label class="pseudo-label" id="pseudo-label">Votre pseudonyme</label>
@@ -103,6 +171,63 @@
           Installer l'application
         </button>
       </main>
+
+      <!-- Indexable content: what the service is, who it is for, common questions -->
+      <section class="info" aria-labelledby="how-title">
+        <h2 id="how-title">Comment envoyer un fichier en 3 étapes</h2>
+        <ol class="steps">
+          <li><strong>Ouvrez le site</strong> sur l'appareil qui a le fichier et créez un salon.</li>
+          <li><strong>Scannez le QR code</strong> avec l'autre appareil, ou envoyez le lien d'invitation.</li>
+          <li><strong>Partagez</strong> : le fichier passe directement d'un appareil à l'autre.</li>
+        </ol>
+      </section>
+
+      <section class="info" aria-labelledby="who-title">
+        <h2 id="who-title">Seul ou à plusieurs</h2>
+        <div class="usecases">
+          <article>
+            <h3>Du téléphone à l'ordinateur</h3>
+            <p>Transférez vos photos, vidéos et documents entre vos propres appareils, sans câble USB et sans vous les envoyer par e-mail.</p>
+          </article>
+          <article>
+            <h3>En réunion, en cours, en famille</h3>
+            <p>Un QR code à scanner et tout le monde est dans le même salon : fichiers, messages et liens s'échangent sans créer de groupe ni donner son numéro.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="info" aria-labelledby="faq-title">
+        <h2 id="faq-title">Questions fréquentes</h2>
+        <details>
+          <summary>P2P Share est-il vraiment gratuit ?</summary>
+          <p>Oui. P2P Share est gratuit, sans abonnement, sans publicité et sans inscription.</p>
+        </details>
+        <details>
+          <summary>Faut-il créer un compte ou installer une application ?</summary>
+          <p>Non. Il suffit d'ouvrir le site dans un navigateur, sur téléphone ou sur ordinateur. Aucune adresse e-mail ni numéro de téléphone n'est demandé.</p>
+        </details>
+        <details>
+          <summary>Comment envoyer un fichier de mon téléphone à mon ordinateur ?</summary>
+          <p>Ouvrez P2P Share sur l'ordinateur et créez un salon, scannez le QR code avec le téléphone, puis choisissez le fichier à envoyer. Il arrive directement sur l'autre appareil.</p>
+        </details>
+        <details>
+          <summary>Mes fichiers sont-ils stockés sur un serveur ?</summary>
+          <p>Non. Les fichiers passent d'un appareil à l'autre et sont chiffrés de bout en bout : le serveur ne peut pas les lire et ne les conserve pas. Quand le salon est fermé, tout disparaît.</p>
+        </details>
+        <details>
+          <summary>Peut-on partager des fichiers à plusieurs ?</summary>
+          <p>Oui. Tous ceux qui ouvrent le lien ou scannent le QR code rejoignent le même salon et peuvent envoyer et recevoir des fichiers, des messages et des liens.</p>
+        </details>
+        <details>
+          <summary>Les photos et vidéos sont-elles compressées ?</summary>
+          <p>Non. Les fichiers sont transmis tels quels, dans leur qualité d'origine.</p>
+        </details>
+      </section>
+
+      <footer class="home-footer">
+        <span>P2P Share — partage de fichiers gratuit, sans compte, chiffré de bout en bout.</span>
+        <a href="https://github.com/Univers-Numerique/P2P-Share" rel="noopener">Code source sur GitHub</a>
+      </footer>
     </div>
   </div>
 
@@ -285,6 +410,5 @@
   <!-- TOAST -->
   <div class="toast" id="toast" role="alert" aria-live="polite"></div>
 
-  <script src="/app.js"></script>
 </body>
 </html>

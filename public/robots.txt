@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+# Canaux techniques (temps réel, signalisation) : rien à indexer
+Disallow: /socket.io/?
+Disallow: /peerjs/
+Disallow: /config
+Disallow: /healthz
+
+Sitemap: https://p2p.nexusnumerique.com/sitemap.xml

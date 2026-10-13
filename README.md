@@ -207,6 +207,9 @@ Si la connexion WebRTC directe échoue (NAT strict, pare-feu), les morceaux chif
 - Écran maintenu allumé pendant un envoi ou une réception (Screen Wake Lock), pour que la mise en veille automatique du téléphone ne coupe pas le transfert
 - PWA installable : bouton « Installer l'application » (Chrome, Edge, Android), instructions pour iPhone/iPad, icône adaptative Android, Service Worker « réseau d'abord ». L'installation exige un certificat HTTPS reconnu par l'appareil : un certificat auto-signé ne suffit pas.
 - En-têtes de sécurité (CSP, nosniff, no-referrer)
+- Référencement : titre et description orientés recherche, contenu explicatif et FAQ sur l'accueil, données structurées (`WebApplication`, `FAQPage`), `robots.txt`, `sitemap.xml`, adresse canonique, image d'aperçu pour les réseaux sociaux (`og-image.png`). Les liens d'invitation (`/?salon=…`) sont exclus de l'indexation.
+
+> Le domaine `https://p2p.nexusnumerique.com` est écrit en dur dans `public/index.html`, `public/robots.txt` et `public/sitemap.xml` : à adapter si le site change d'adresse.
 
 ---
 

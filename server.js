@@ -55,6 +55,9 @@ app.use((req, res, next) => {
   ].join('; '));
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
+  // Invite links (/?salon=…) are private, short-lived pages: keep them out of search results.
+  // Only the plain home page is meant to be indexed.
+  if (req.query.salon !== undefined) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   next();
 });
 
@@ -117,7 +120,13 @@ app.get('/healthz', (req, res) => {
   res.json({ ok: true, salons: salons.size, members });
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+// Images rarely change: let browsers and link-preview crawlers keep them a week.
+// Code and pages stay revalidated on every visit, so an update is picked up at once.
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, file) {
+    if (/\.(png|jpe?g|webp|svg|ico)$/i.test(file)) res.setHeader('Cache-Control', 'public, max-age=604800');
+  }
+}));
 
 // ── SOCKET.IO ─────────────────────────────────────────────────────
 function originAllowed(req) {

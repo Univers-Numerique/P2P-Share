@@ -7,3 +7,6 @@ certs/
 *.log
 .DS_Store
 Thumbs.db
+
+# Fichiers audio de travail (vidéo publicitaire)
+voix off/
